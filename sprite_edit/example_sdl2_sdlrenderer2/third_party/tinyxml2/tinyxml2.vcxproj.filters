@@ -1,0 +1,21 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="D:\cplusplus\engine_tools\sprite_edit\third_party\tinyxml2\tinyxml2.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="D:\cplusplus\engine_tools\sprite_edit\third_party\tinyxml2\tinyxml2.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="D:\cplusplus\engine_tools\sprite_edit\third_party\tinyxml2\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{6ED5B0B3-5706-372F-93D6-0B1131D1FC5A}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

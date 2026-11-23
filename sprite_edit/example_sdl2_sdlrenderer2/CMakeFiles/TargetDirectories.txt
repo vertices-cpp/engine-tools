@@ -1,0 +1,6 @@
+D:/cplusplus/engine_tools/sprite_edit/example_sdl2_sdlrenderer2/CMakeFiles/sprite_editor.dir
+D:/cplusplus/engine_tools/sprite_edit/example_sdl2_sdlrenderer2/CMakeFiles/SyncRes.dir
+D:/cplusplus/engine_tools/sprite_edit/example_sdl2_sdlrenderer2/CMakeFiles/ALL_BUILD.dir
+D:/cplusplus/engine_tools/sprite_edit/example_sdl2_sdlrenderer2/CMakeFiles/ZERO_CHECK.dir
+D:/cplusplus/engine_tools/sprite_edit/example_sdl2_sdlrenderer2/third_party/imgui-1.89.9/CMakeFiles/imgui.dir
+D:/cplusplus/engine_tools/sprite_edit/example_sdl2_sdlrenderer2/third_party/tinyxml2/CMakeFiles/tinyxml2.dir

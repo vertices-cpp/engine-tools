@@ -1,0 +1,1291 @@
+﻿#include "SpriteEditor.h"
+#include <algorithm>
+#include <queue>
+#include <iostream>
+#include <fstream>
+#include <cstdio>
+
+// ★ 不要在这里定义 STB_IMAGE_IMPLEMENTATION，它在 Texture2D.cpp 已经定义过了
+#include "stb_image.h" 
+
+// ★ stb_image_write 没有冲突，可以在这里定义一次用于导出图片
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
+#include "tinyxml2.h"
+
+using namespace tinyxml2;
+
+template<typename T>
+static inline T Clamp(T v, T minv, T maxv)
+{
+	if (v < minv) return minv;
+	if (v > maxv) return maxv;
+	return v;
+}
+
+
+SpriteEditor::SpriteEditor() {
+	_texture = new Texture2D();
+	_packedTexture = new Texture2D();
+	strcpy(_atlasExportName, "atlas_output"); //加上这一行
+}
+
+SpriteEditor::~SpriteEditor() {
+	if (_texture) delete _texture;
+	if (_packedTexture) delete _packedTexture;
+	if (_rawPixels) stbi_image_free(_rawPixels);
+}
+
+void SpriteEditor::init(SDL_Renderer* renderer) {
+	_renderer = renderer;
+	PushState();
+}
+
+
+void SpriteEditor::loadImage(const std::string& path) {
+	_currentImgPath = path;
+	int comp;
+	if (_rawPixels) {
+		stbi_image_free(_rawPixels);
+		_rawPixels = nullptr;
+	}
+
+	_rawPixels = stbi_load(path.c_str(), &_imgW, &_imgH, &comp, 4);
+	if (!_rawPixels) {
+		printf("Failed to load image: %s\nReason: %s\n", path.c_str(), stbi_failure_reason());
+		_imgW = _imgH = 0;
+		return;
+	}
+
+	// ★ 核心修复：将原始 RGBA 像素直接上传为纹理
+	_texture->loadRawPixels(_renderer, _rawPixels, _imgW, _imgH);
+
+	_frames.clear();
+	_selectedFrameIndex = -1;
+	PushState();
+	printf("Loaded image: %d x %d\n", _imgW, _imgH);
+}
+
+void SpriteEditor::loadPlist(const std::string& path) {
+	_plistPath = path;
+	XMLDocument doc;
+	if (doc.LoadFile(path.c_str()) != XML_SUCCESS) return;
+
+	_frames.clear();
+	XMLElement* root = doc.FirstChildElement("plist");
+	if (!root) return;
+	XMLElement* dict = root->FirstChildElement("dict");
+	if (!dict) return;
+
+	XMLElement* framesNode = dict->FirstChildElement("key");
+	while (framesNode && std::string(framesNode->GetText()) != "frames") {
+		framesNode = framesNode->NextSiblingElement("key");
+	}
+	if (!framesNode) return;
+
+	XMLElement* framesDict = framesNode->NextSiblingElement("dict");
+	if (!framesDict) return;
+
+	for (XMLElement* e = framesDict->FirstChildElement(); e != nullptr; e = e->NextSiblingElement()) {
+		if (std::string(e->Value()) == "key") {
+			std::string frameName = e->GetText();
+			XMLElement* subDict = e->NextSiblingElement("dict");
+			if (!subDict) continue;
+
+			XMLElement* texRectNode = subDict->FirstChildElement("key");
+			while (texRectNode && std::string(texRectNode->GetText()) != "frame") {
+				texRectNode = texRectNode->NextSiblingElement("key");
+			}
+			if (texRectNode) {
+				XMLElement* strNode = texRectNode->NextSiblingElement("string");
+				if (strNode) {
+					std::string rectStr = strNode->GetText();
+					int x, y, w, h;
+					if (sscanf(rectStr.c_str(), "{{%d,%d},{%d,%d}}", &x, &y, &w, &h) == 4) {
+						SpriteFrame sf;
+						sf.name = frameName;
+						sf.rect = Rect((float)x, (float)y, (float)w, (float)h);
+						_frames.push_back(sf);
+					}
+				}
+			}
+		}
+	}
+	PushState();
+	printf("Loaded Plist, frames: %d\n", (int)_frames.size());
+}
+
+// ======================= UI =======================
+
+void SpriteEditor::drawUI() {
+
+
+	DrawMainMenuBar();
+
+	if (_fileDialog.Display()) {
+		std::string path = _fileDialog.GetFilePath();
+		if (_loadMode == 0) {
+			loadImage(path);
+		}
+		else if (_loadMode == 1) {
+			loadPlist(path);
+		}
+	}
+
+	// ★ 绘制独立的预览窗口
+	if (_showPreviewWindow) {
+		DrawPreviewWindow();
+	}
+
+	ImGuiIO& io = ImGui::GetIO();
+	ImGui::SetNextWindowPos(ImVec2(0, 20));
+	ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x, io.DisplaySize.y - 20));
+	ImGui::Begin("Sprite Editor Main", nullptr,
+		ImGuiWindowFlags_NoTitleBar |
+		ImGuiWindowFlags_NoResize |
+		ImGuiWindowFlags_NoMove |
+		ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+
+
+	float totalAvailWidth = ImGui::GetContentRegionAvail().x;
+	// ★ 加宽拖拽条：从 12f 增加到 32f，方便手机点击
+	float splitterWidth = 32.0f;
+
+	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
+
+	// ================= 左侧面板 =================
+	ImGui::BeginChild("Left", ImVec2(_leftPanelWidth, 0), true);
+	DrawLeftPanel();
+	ImGui::EndChild();
+
+	ImGui::SameLine();
+
+	// ================= 左分隔条 =================
+	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.4f, 0.4f, 0.4f, 1.0f));
+	ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+
+	// 画一个带纹理的拖拽条，看起来更直观
+	ImVec2 splitterPos = ImGui::GetCursorScreenPos();
+	ImGui::Button("##LeftSplitter", ImVec2(splitterWidth, ImGui::GetContentRegionAvail().y));
+	ImGui::GetWindowDrawList()->AddLine(
+		ImVec2(splitterPos.x + splitterWidth / 2, splitterPos.y + 20),
+		ImVec2(splitterPos.x + splitterWidth / 2, splitterPos.y + ImGui::GetContentRegionAvail().y - 20),
+		IM_COL32(100, 100, 100, 200), 2.0f
+	);
+
+	ImGui::PopStyleColor(3);
+
+	if (ImGui::IsItemActive()) {
+		_leftPanelWidth += io.MouseDelta.x;
+		if (_leftPanelWidth < 150.0f) _leftPanelWidth = 150.0f;
+		if (_leftPanelWidth > totalAvailWidth * 0.6f) _leftPanelWidth = totalAvailWidth * 0.6f;
+	}
+	if (ImGui::IsItemHovered() || ImGui::IsItemActive()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+
+	ImGui::SameLine();
+
+	// ================= 中间画布 =================
+	float centerWidth = totalAvailWidth - _leftPanelWidth - _rightPanelWidth - splitterWidth * 2;
+	if (centerWidth < 100.0f) centerWidth = 100.0f;
+
+	ImGui::BeginChild("Center", ImVec2(centerWidth, 0), true);
+	DrawCenterView();
+	ImGui::EndChild();
+
+	ImGui::SameLine();
+
+	// ================= 右分隔条 =================
+	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.4f, 0.4f, 0.4f, 1.0f));
+	ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+
+	ImVec2 splitterPosR = ImGui::GetCursorScreenPos();
+	ImGui::Button("##RightSplitter", ImVec2(splitterWidth, ImGui::GetContentRegionAvail().y));
+	ImGui::GetWindowDrawList()->AddLine(
+		ImVec2(splitterPosR.x + splitterWidth / 2, splitterPosR.y + 20),
+		ImVec2(splitterPosR.x + splitterWidth / 2, splitterPosR.y + ImGui::GetContentRegionAvail().y - 20),
+		IM_COL32(100, 100, 100, 200), 2.0f
+	);
+
+	ImGui::PopStyleColor(3);
+
+	if (ImGui::IsItemActive()) {
+		_rightPanelWidth -= io.MouseDelta.x;
+		if (_rightPanelWidth < 150.0f) _rightPanelWidth = 150.0f;
+		if (_rightPanelWidth > totalAvailWidth * 0.6f) _rightPanelWidth = totalAvailWidth * 0.6f;
+	}
+	if (ImGui::IsItemHovered() || ImGui::IsItemActive()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+
+	ImGui::SameLine();
+
+	// ================= 右侧面板 =================
+	ImGui::BeginChild("Right", ImVec2(_rightPanelWidth, 0), true);
+	DrawRightPanel();
+	ImGui::EndChild();
+
+	ImGui::PopStyleVar();
+
+	ImGui::End();
+}
+
+void SpriteEditor::DrawMainMenuBar() {
+	if (ImGui::BeginMainMenuBar()) {
+		if (ImGui::BeginMenu("File")) {
+			 
+			ImGui::EndMenu();
+		}
+		if (ImGui::BeginMenu("Edit")) {
+			if (ImGui::MenuItem("Undo", "Ctrl+Z", false, _historyIndex > 0)) Undo();
+			if (ImGui::MenuItem("Redo", "Ctrl+Y", false, _historyIndex < (int)_history.size() - 1)) Redo();
+			ImGui::EndMenu();
+		}
+		ImGui::EndMainMenuBar();
+	}
+}
+
+
+void SpriteEditor::DrawCenterView() {
+	if (!_texture || !_texture->getTexture()) {
+		ImGui::TextColored(ImVec4(1, 0, 0, 1), "Please load an image first.");
+		return;
+	}
+	// ================== ★ 顶部缩放工具栏 ==================
+	ImGui::SetNextItemWidth(200.0f);
+	ImGui::SliderFloat("Zoom", &_viewScale, 0.1f, 10.0f, "%.2fx");
+	ImGui::SameLine();
+	if (ImGui::Button("Reset")) {
+		_viewScale = 1.0f;
+		_viewOffset = ImVec2(10, 10);
+	}
+	ImGui::Separator();
+	ImVec2 canvas_pos = ImGui::GetCursorScreenPos();
+	ImVec2 canvas_size = ImGui::GetContentRegionAvail();
+	ImGui::InvisibleButton("canvas", canvas_size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
+	bool is_hovered = ImGui::IsItemHovered();
+	ImDrawList* draw_list = ImGui::GetWindowDrawList();
+	draw_list->PushClipRect(canvas_pos, ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y), true);
+	draw_list->AddRectFilled(canvas_pos, ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y), IM_COL32(40, 40, 40, 255));
+	ImGuiIO& io = ImGui::GetIO();
+	// ================== 交互逻辑 ==================
+	// 1. 滚轮缩放
+	if (is_hovered && io.MouseWheel != 0.0f) {
+		float zoom_factor = 1.0f + (io.MouseWheel * 0.1f);
+		float new_scale = _viewScale * zoom_factor;
+		if (new_scale < 0.1f) new_scale = 0.1f;
+		if (new_scale > 10.0f) new_scale = 10.0f;
+		float mouse_x = io.MousePos.x - canvas_pos.x;
+		float mouse_y = io.MousePos.y - canvas_pos.y;
+		float img_x = (mouse_x - _viewOffset.x) / _viewScale;
+		float img_y = (mouse_y - _viewOffset.y) / _viewScale;
+		_viewScale = new_scale;
+		_viewOffset.x = mouse_x - img_x * _viewScale;
+		_viewOffset.y = mouse_y - img_y * _viewScale;
+	}
+	// 2. 拖拽平移
+	bool is_dragging_left = ImGui::IsMouseDragging(ImGuiMouseButton_Left) && (io.MouseDragMaxDistanceSqr[0] > 4.0f);
+	if (is_hovered && (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
+		ImGui::IsMouseDragging(ImGuiMouseButton_Right) ||
+		is_dragging_left)) {
+		_viewOffset.x += io.MouseDelta.x;
+		_viewOffset.y += io.MouseDelta.y;
+	}
+
+	// ==========【重点】统一放到鼠标抬起处理：拾取帧 + 网格新增帧 ==========
+	if (is_hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+	{
+		//只有点击，不是拖拽（拖动距离很小才算点击）
+		if (io.MouseDragMaxDistanceSqr[0] < 4.0f)
+		{
+			// ========== 修复：必须减去 canvas_pos.x / canvas_pos.y ==========
+			float localMouseX = io.MousePos.x - canvas_pos.x;
+			float localMouseY = io.MousePos.y - canvas_pos.y;
+
+			float mx = (localMouseX - _viewOffset.x) / _viewScale;
+			float my = (localMouseY - _viewOffset.y) / _viewScale;
+
+			int hitIndex = -1;
+			//遍历所有帧，找鼠标落在哪个rect内部
+			for (int i = 0; i < (int)_frames.size(); i++)
+			{
+				auto& fr = _frames[i];
+				if (mx >= fr.rect.x && my >= fr.rect.y
+					&& mx < fr.rect.x + fr.rect.w
+					&& my < fr.rect.y + fr.rect.h)
+				{
+					hitIndex = i;
+					break;
+				}
+			}
+
+			if (hitIndex != -1)
+			{
+				//✅命中已有切片：只做选中，任何模式都生效！不新增帧
+				_selectedFrameIndex = hitIndex;
+				_animCurrentFrame = hitIndex;
+				_wantScrollToSelected = true; //👉 请求下一帧自动滚动列表
+			}
+			else
+			{
+				//❌没有命中任何帧，只有Mode0网格模式才允许新建格子
+				if (_currentMode == 0)
+				{
+					float localX = mx;
+					float localY = my;
+					if (localX >= 0 && localX < _imgW && localY >= 0 && localY < _imgH)
+					{
+						if (_snapToGrid) {
+							localX = floor(localX / _gridW) * _gridW;
+							localY = floor(localY / _gridH) * _gridH;
+						}
+						SpriteFrame newFrame;
+						newFrame.name = "frame_" + std::to_string(_frames.size());
+						newFrame.rect = Rect(localX, localY, _snapToGrid ? _gridW : 64, _snapToGrid ? _gridH : 64);
+						newFrame.markSelect = 0;
+						_frames.push_back(newFrame);
+						_selectedFrameIndex = _frames.size() - 1;
+						PushState();
+					}
+				}
+			}
+		}
+	}
+
+
+	// ================== 渲染图像 ==================
+	ImVec2 img_pos = ImVec2(canvas_pos.x + _viewOffset.x, canvas_pos.y + _viewOffset.y);
+	ImVec2 img_size = ImVec2(_imgW * _viewScale, _imgH * _viewScale);
+	draw_list->AddImage((ImTextureID)(intptr_t)_texture->getTexture(), img_pos, ImVec2(img_pos.x + img_size.x, img_pos.y + img_size.y));
+	// 画网格
+	if (_currentMode == 0) {
+		for (float x = 0; x < _imgW; x += _gridW) {
+			draw_list->AddLine(ImVec2(img_pos.x + x * _viewScale, img_pos.y), ImVec2(img_pos.x + x * _viewScale, img_pos.y + img_size.y), IM_COL32(255, 255, 255, 50));
+		}
+		for (float y = 0; y < _imgH; y += _gridH) {
+			draw_list->AddLine(ImVec2(img_pos.x, img_pos.y + y * _viewScale), ImVec2(img_pos.x + img_size.x, img_pos.y + y * _viewScale), IM_COL32(255, 255, 255, 50));
+		}
+	}
+	// 画全部帧框
+	for (int i = 0; i < _frames.size(); ++i) {
+		auto& f = _frames[i];
+		ImVec2 rmin = ImVec2(img_pos.x + f.rect.x * _viewScale, img_pos.y + f.rect.y * _viewScale);
+		ImVec2 rmax = ImVec2(rmin.x + f.rect.w * _viewScale, rmin.y + f.rect.h * _viewScale);
+		ImU32 color = (i == _selectedFrameIndex) ? IM_COL32(0, 255, 255, 255) : IM_COL32(255, 200, 0, 200);
+		draw_list->AddRect(rmin, rmax, color, 0.0f, 0, 2.0f);
+	}
+	draw_list->PopClipRect();
+}
+
+
+
+void SpriteEditor::update(float dt) {
+	if (_isPlaying && _frames.size() > 0)
+	{
+		int playBeginIdx = 0;
+		int playEndIdx = (int)_frames.size() - 1;
+		bool hasStart = false, hasEnd = false;
+		//扫描找标记
+		for (int i = 0; i < (int)_frames.size(); i++)
+		{
+			if (_frames[i].markSelect == 1)
+			{
+				playBeginIdx = i;
+				hasStart = true;
+			}
+			if (_frames[i].markSelect == 2)
+			{
+				playEndIdx = i;
+				hasEnd = true;
+			}
+		}
+		if (hasStart && !hasEnd) playEndIdx = (int)_frames.size() - 1;
+		if (!hasStart && hasEnd) playBeginIdx = 0;
+
+		//确保 begin <= end
+		if (playBeginIdx > playEndIdx)
+		{
+			std::swap(playBeginIdx, playEndIdx);
+		}
+		int rangeCount = playEndIdx - playBeginIdx + 1;
+		if (rangeCount <= 0) return;
+
+		_animTimer += dt;
+		float frameDt = 1.0f / _animFPS;
+		if (_animTimer >= frameDt)
+		{
+			_animTimer -= frameDt;
+			_animCurrentFrame += 1;
+
+			if (_animCurrentFrame > playEndIdx)
+			{
+				if (_animLoop)
+				{
+					_animCurrentFrame = playBeginIdx;
+				}
+				else
+				{
+					_animCurrentFrame = playEndIdx;
+					_isPlaying = false;
+				}
+			}
+			// 保护：如果当前帧跑到区间外面
+			if (_animCurrentFrame < playBeginIdx || _animCurrentFrame> playEndIdx)
+			{
+				_animCurrentFrame = playBeginIdx;
+			}
+		}
+	}
+}
+
+void SpriteEditor::RefreshAtlasPreviewIfOpen()
+{
+	if (_showPreviewWindow)
+	{
+		PackAtlasToMemory();
+	}
+}
+// ======================= 左侧面板：修复按钮高度 =======================
+
+void SpriteEditor::DrawLeftPanel() {
+	float availWidth = ImGui::GetContentRegionAvail().x;
+	// 自动计算合适的高度，适配手机大字体
+	float btnHeight = ImGui::GetFontSize() * 1.5f;
+
+	ImGui::Text("File Management");
+
+	if (ImGui::Button("Load Image", ImVec2(availWidth, btnHeight))) {
+		_loadMode = 0;
+		_fileDialog.Open("Select Image", ".png,.jpg,.jpeg,.bmp");
+	}
+	if (ImGui::Button("Load Plist", ImVec2(availWidth, btnHeight))) {
+		_loadMode = 1;
+		_fileDialog.Open("Select Plist", ".plist");
+	}
+
+	ImGui::Separator();
+	ImGui::Text("Export Atlas File Name(no ext):");
+	ImGui::InputText("##exportname", _atlasExportName, IM_ARRAYSIZE(_atlasExportName));
+	ImGui::SameLine();
+	ImGui::TextDisabled("(*.png / *.plist auto append)");
+	 
+	if (ImGui::Button("Save Atlas To File", ImVec2(availWidth, btnHeight)))
+	{
+		SaveAtlasToFile();
+	}
+
+	ImGui::Separator();
+
+
+	// 路径显示
+	if (!_currentImgPath.empty()) {
+		ImGui::TextColored(ImVec4(0, 1, 0, 1), "Input Path:");
+		ImGui::TextWrapped("%s", _currentImgPath.c_str());
+	}
+	else {
+		ImGui::TextColored(ImVec4(1, 0, 0, 1), "Input: None");
+	}
+
+ 
+		ImGui::TextColored(ImVec4(0, 1, 0, 1), "Output PNG:");
+		ImGui::TextWrapped("%s", _savePngPath.c_str());
+		ImGui::TextColored(ImVec4(0, 1, 0, 1), "Output Plist:");
+		ImGui::TextWrapped("%s", _savePlistPath.c_str());
+ 
+
+	ImGui::Separator();
+	ImGui::Text("Image Info: %d x %d", _imgW, _imgH);
+
+	ImGui::Text("Mode Selection");
+	ImGui::RadioButton("Grid Cut (Mode 1)", &_currentMode, 0);
+	ImGui::RadioButton("Auto Pack (Mode 2)", &_currentMode, 1);
+
+	if (_currentMode == 0) {
+		ImGui::PushItemWidth(availWidth * 0.4f);
+		ImGui::DragFloat("Grid W", &_gridW, 1.0f, 1.0f, 1000.0f);
+		ImGui::DragFloat("Grid H", &_gridH, 1.0f, 1.0f, 1000.0f);
+		ImGui::PopItemWidth();
+
+		ImGui::Checkbox("Snap to Grid", &_snapToGrid);
+
+		// =========新增：批量生成网格帧按钮=========
+		if (ImGui::Button("Generate Grid Frames", ImVec2(availWidth, btnHeight)))
+		{
+			if (_imgW > 0 && _imgH > 0)
+			{
+				// 可选：生成网格前清空旧帧
+				_frames.clear();
+				_selectedFrameIndex = -1;
+
+				for (float y = 0.0f; y < _imgH; y += _gridH)
+				{
+					for (float x = 0.0f; x < _imgW; x += _gridW)
+					{
+						SpriteFrame newFrame;
+						newFrame.name = "grid_" + std::to_string(_frames.size());
+						newFrame.rect = Rect(x, y, _gridW, _gridH);
+						newFrame.markSelect = 0; //标记初始0
+						_frames.push_back(newFrame);
+					}
+				}
+				PushState(); //保存撤销栈
+				RefreshAtlasPreviewIfOpen();
+			}
+		}
+
+		if (ImGui::Button("Clear Frames", ImVec2(availWidth, btnHeight))) {
+			_frames.clear();
+			_selectedFrameIndex = -1;
+			PushState();
+			RefreshAtlasPreviewIfOpen();
+		}
+	}
+	else {
+		ImGui::PushItemWidth(availWidth * 0.4f);
+		ImGui::InputInt("Min Area", &_minArea);
+		ImGui::PopItemWidth();
+
+		if (ImGui::Button("Extract Regions", ImVec2(availWidth, btnHeight))) {
+			AutoExtractSprites();
+		}
+	}
+}
+
+// ======================= 右侧面板：增加 Offset 编辑 =======================
+
+void SpriteEditor::DrawRightPanel() {
+	ImGui::Text("Sprite Frames (%d)", (int)_frames.size());
+	ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1), "☑Mark:Start  ▢Mark:End (max two mark)");
+	ImGui::Separator();
+
+	ImGui::BeginChild("FrameList", ImVec2(0, ImGui::GetContentRegionAvail().y * 0.4f), true);
+
+	int markDeleteIdx = -1; // 标记要删除的下标
+
+	for (int i = 0; i < (int)_frames.size(); ++i)
+	{
+		auto& f = _frames[i];
+		ImGui::PushID(i);
+
+		//==== 标记勾选框 =====
+		int mark = f.markSelect;
+		bool bMark = (mark != 0);
+		if (ImGui::Checkbox(("##mark" + std::to_string(i)).c_str(), &bMark))
+		{
+			if (bMark)
+			{
+				int cntStart = 0, cntEnd = 0;
+				for (auto &fr : _frames)
+				{
+					if (fr.markSelect == 1) cntStart++;
+					if (fr.markSelect == 2) cntEnd++;
+				}
+				if (cntStart == 0)
+				{
+					f.markSelect = 1;
+				}
+				else if (cntEnd == 0)
+				{
+					f.markSelect = 2;
+				}
+				else
+				{
+					for (auto &fr : _frames)
+					{
+						if (fr.markSelect == 2) fr.markSelect = 0;
+					}
+					f.markSelect = 2;
+				}
+			}
+			else
+			{
+				f.markSelect = 0;
+			}
+		}
+		ImGui::SameLine();
+
+		// 条目选中
+		if (ImGui::Selectable(f.name.c_str(), i == _selectedFrameIndex))
+		{
+			_selectedFrameIndex = i;
+			_animCurrentFrame = i;
+			_wantScrollToSelected = true;
+		}
+
+		// ========= 新增：需要滚动，且是当前选中行 =========
+		if (i == _selectedFrameIndex && _wantScrollToSelected)
+		{
+			// 0.5f：尽量滚动到窗口垂直中间；0.0f=置顶，1.0f=置底
+			ImGui::SetScrollHereY(0.5f);
+			_wantScrollToSelected = false; //消耗掉标记，只滚一次
+		}
+
+		// ====== 拖拽源 ======
+		if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+		{
+			ImGui::SetDragDropPayload("FRAME_ITEM", &i, sizeof(int));
+			ImGui::TextUnformatted(f.name.c_str());
+			ImGui::EndDragDropSource();
+		}
+
+		// ====== 拖拽目标：放到当前条目上方 ======
+		if (ImGui::BeginDragDropTarget())
+		{
+			if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("FRAME_ITEM"))
+			{
+				int srcIdx = *(const int*)payload->Data;
+				int dstIdx = i;
+				if (srcIdx != dstIdx)
+				{
+					SpriteFrame temp = _frames[srcIdx];
+					_frames.erase(_frames.begin() + srcIdx);
+					_frames.insert(_frames.begin() + dstIdx, temp);
+
+					if (_selectedFrameIndex == srcIdx)
+						_selectedFrameIndex = dstIdx;
+					else if (srcIdx < _selectedFrameIndex && dstIdx >= _selectedFrameIndex)
+						_selectedFrameIndex -= 1;
+					else if (srcIdx > _selectedFrameIndex && dstIdx <= _selectedFrameIndex)
+						_selectedFrameIndex += 1;
+
+					PushState();
+				}
+			}
+			ImGui::EndDragDropTarget();
+		}
+
+		// ====== 右键上下文菜单【Delete】重点补回 ======
+		if (ImGui::BeginPopupContextItem())
+		{
+			if (ImGui::MenuItem("Delete"))
+			{
+				markDeleteIdx = i; //只记录标记，不erase、不break
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndPopup();
+		}
+
+		ImGui::PopID(); //每轮循环一定执行PopID，ID栈平衡！
+	}
+
+
+	// ========== 循环结束之后，再执行真正删除 =========
+	if (markDeleteIdx != -1)
+	{
+		int delIdx = markDeleteIdx;
+		if (delIdx >= 0 && delIdx < (int)_frames.size())
+		{
+			// 先保存快照
+			PushState();
+
+			_frames.erase(_frames.begin() + delIdx);
+
+			// 同步修正选中、动画索引
+			if (_animCurrentFrame > delIdx)
+			{
+				_animCurrentFrame--;
+			}
+			else if (_animCurrentFrame == delIdx)
+			{
+				_animCurrentFrame = _frames.empty() ? -1 : 0;
+			}
+
+			if (_selectedFrameIndex == delIdx)
+			{
+				_selectedFrameIndex = _frames.empty() ? -1 : ((int)_frames.size() - 1);
+			}
+			else if (_selectedFrameIndex > delIdx)
+			{
+				_selectedFrameIndex--;
+			}
+		}
+	}
+
+	ImGui::EndChild();
+
+
+	//=====快捷按钮：清除全部标记=====
+	if (ImGui::Button("Clear All Mark"))
+	{
+		for (auto &fr : _frames) fr.markSelect = 0;
+	}
+
+	if (_selectedFrameIndex >= 0 && _selectedFrameIndex < _frames.size()) {
+		ImGui::Separator();
+		ImGui::Text("Edit Frame:");
+		auto& r = _frames[_selectedFrameIndex].rect;
+		auto& o = _frames[_selectedFrameIndex].offset;
+
+		bool changed = false;
+		ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.5f);
+
+		changed |= ImGui::DragFloat("X", &r.x, 1.0f);
+		changed |= ImGui::DragFloat("Y", &r.y, 1.0f);
+		changed |= ImGui::DragFloat("W", &r.w, 1.0f);
+		changed |= ImGui::DragFloat("H", &r.h, 1.0f);
+
+		ImGui::Separator();
+		changed |= ImGui::DragFloat("Offset X", &o.x, 1.0f);
+		changed |= ImGui::DragFloat("Offset Y", &o.y, 1.0f);
+
+		ImGui::PopItemWidth();
+
+		if (ImGui::IsItemDeactivatedAfterEdit() && changed) {
+			PushState();
+		}
+	}
+
+	ImGui::Separator();
+	if (ImGui::Button(_showPreviewWindow ? "Close Preview" : "Open Preview", ImVec2(-1, ImGui::GetFontSize() * 1.5f))) {
+		if (_showPreviewWindow)
+		{
+			// 当前是打开状态 → 关闭
+			_showPreviewWindow = false;
+		}
+		else
+		{
+			// 当前是关闭状态 → 打开，打包
+			PackAtlasToMemory();
+			_animPreviewScale = 1.0f;
+			_showPreviewWindow = true;
+		}
+	}
+
+
+}
+
+
+
+// ======================= 独立预览窗口（包含动画） =======================
+
+void SpriteEditor::DrawPreviewWindow() {
+	//ImGui::SetNextWindowSize(ImVec2(800, 600), ImGuiCond_FirstUseEver);
+	if (ImGui::Begin("Preview Window", &_showPreviewWindow)) {
+
+		if (ImGui::BeginTabBar("PreviewTabs")) {
+
+			// Tab 1: 图集重组结果
+			if (ImGui::BeginTabItem("Atlas Result"))
+			{
+				if (_packedTexture && _packedTexture->getTexture() && _packW > 0 && _packH > 0)
+				{
+					ImVec2 canvasPos = ImGui::GetCursorScreenPos();
+					ImVec2 canvasSize = ImGui::GetContentRegionAvail();
+					ImGui::InvisibleButton("atlas_canvas", canvasSize);
+					bool hover = ImGui::IsItemHovered();
+					ImGuiIO& io = ImGui::GetIO();
+
+					// 左键拖拽平移
+					if (ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f) && hover)
+					{
+						_atlasPan.x += io.MouseDelta.x;
+						_atlasPan.y += io.MouseDelta.y;
+					}
+
+					// 滚轮缩放（鼠标位置为中心缩放）
+					if (hover && io.MouseWheel != 0)
+					{
+						ImVec2 mouseInCanvas = ImVec2(io.MousePos.x - canvasPos.x, io.MousePos.y - canvasPos.y);
+						float zoomOld = _atlasZoom;
+						float zoomStep = 0.1f;
+						_atlasZoom += io.MouseWheel * zoomStep;
+						if (_atlasZoom < 0.1f) _atlasZoom = 0.1f;
+						if (_atlasZoom > 5.0f) _atlasZoom = 5.0f;
+
+						_atlasPan.x -= mouseInCanvas.x * (_atlasZoom / zoomOld - 1.0f);
+						_atlasPan.y -= mouseInCanvas.y * (_atlasZoom / zoomOld - 1.0f);
+					}
+
+					ImGui::Text("Atlas Preview | Zoom: %.2fx", _atlasZoom);
+					ImGui::SameLine();
+					if (ImGui::Button("Reset View"))
+					{
+						_atlasPan = ImVec2(0, 0);
+						_atlasZoom = 1.0f;
+					}
+
+					ImDrawList* dl = ImGui::GetWindowDrawList();
+					dl->PushClipRect(canvasPos, ImVec2(canvasPos.x + canvasSize.x, canvasPos.y + canvasSize.y), true);
+					dl->AddRectFilled(canvasPos, ImVec2(canvasPos.x + canvasSize.x, canvasPos.y + canvasSize.y), IM_COL32(30, 30, 30, 255));
+
+					float texW = (float)_packW;
+					float texH = (float)_packH;
+					float dispW = texW * _atlasZoom;
+					float dispH = texH * _atlasZoom;
+
+					ImVec2 drawPos = ImVec2(
+						canvasPos.x + (canvasSize.x - dispW) * 0.5f + _atlasPan.x,
+						canvasPos.y + (canvasSize.y - dispH) * 0.5f + _atlasPan.y
+					);
+
+					ImVec2 uv0(0, 0);
+					ImVec2 uv1(1, 1);
+					dl->AddImage(
+						(ImTextureID)(intptr_t)_packedTexture->getTexture(),
+						drawPos,
+						ImVec2(drawPos.x + dispW, drawPos.y + dispH),
+						uv0, uv1
+					);
+
+					dl->PopClipRect();
+				}
+				else
+				{
+					ImGui::TextDisabled("Build atlas first.");
+				}
+				ImGui::EndTabItem();
+			}
+
+
+			// Tab 2: 动画播放预览
+			if (ImGui::BeginTabItem("Animation")) {
+				if (_texture && _texture->getTexture() && !_frames.empty()) {
+					int frameTotal = (int)_frames.size();
+
+					//运行时扫描标记，得到播放区间（UI显示提示用）
+					int playBeginIdx = 0, playEndIdx = frameTotal - 1;
+					bool hasStart = false, hasEnd = false;
+					for (int i = 0; i < frameTotal; i++)
+					{
+						if (_frames[i].markSelect == 1) { playBeginIdx = i; hasStart = true; }
+						if (_frames[i].markSelect == 2) { playEndIdx = i; hasEnd = true; }
+					}
+					if (hasStart && !hasEnd) playEndIdx = frameTotal - 1;
+					if (!hasStart && hasEnd) playBeginIdx = 0;
+					if (playBeginIdx > playEndIdx) std::swap(playBeginIdx, playEndIdx);
+
+					// =========播放控制栏 =========
+					if (ImGui::Button(_isPlaying ? "Pause" : "Play")) {
+						_isPlaying = !_isPlaying;
+						if (_isPlaying)
+						{
+							//点击播放，跳到区间起点
+							_animCurrentFrame = playBeginIdx;
+						}
+					}
+					ImGui::SameLine();
+					ImGui::SetNextItemWidth(100.0f);
+					ImGui::SliderFloat("FPS", &_animFPS, 1.0f, 60.0f, "%.0f");
+
+					ImGui::SameLine();
+					ImGui::SetNextItemWidth(100.0f);
+					ImGui::SliderFloat("Zoom", &_animPreviewScale, 0.1f, 5.0f, "%.2fx");
+
+					ImGui::SameLine();
+					if (ImGui::Button("ResetZoom"))
+					{
+						_animPreviewScale = 1.0f;
+					}
+					ImGui::SameLine();
+					ImGui::Checkbox("Loop", &_animLoop);
+
+					//显示当前识别的区间提示
+					if (hasStart || hasEnd)
+					{
+						ImGui::TextColored(ImVec4(0, 1, 1, 1), "Play range: %d ~ %d", playBeginIdx, playEndIdx);
+					}
+					else
+					{
+						ImGui::TextDisabled("Play range: All frames (no mark)");
+					}
+					ImGui::Text("Frame:%d/%d", _animCurrentFrame + 1, frameTotal);
+
+					ImVec2 canvas_pos = ImGui::GetCursorScreenPos();
+					ImVec2 canvas_size = ImGui::GetContentRegionAvail();
+					ImGui::InvisibleButton("anim_canvas", canvas_size);
+					bool hoverAnimCanvas = ImGui::IsItemHovered();
+					ImGuiIO& io = ImGui::GetIO();
+					//鼠标滚轮缩放动画预览画布
+					if (hoverAnimCanvas && io.MouseWheel != 0)
+					{
+						float zoomFac = 1.0f + io.MouseWheel * 0.1f;
+						_animPreviewScale *= zoomFac;
+						_animPreviewScale = Clamp(_animPreviewScale, 0.1f, 5.0f);
+					}
+
+					ImDrawList* draw_list = ImGui::GetWindowDrawList();
+					draw_list->PushClipRect(canvas_pos, ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y), true);
+
+					//井字格参考背景
+					draw_list->AddRectFilled(canvas_pos, ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y), IM_COL32(40, 40, 40, 255));
+					ImVec2 center = ImVec2(canvas_pos.x + canvas_size.x / 2, canvas_pos.y + canvas_size.y / 2);
+					draw_list->AddLine(ImVec2(center.x, canvas_pos.y), ImVec2(center.x, canvas_pos.y + canvas_size.y), IM_COL32(255, 255, 255, 30), 2.0f);
+					draw_list->AddLine(ImVec2(canvas_pos.x, center.y), ImVec2(canvas_pos.x + canvas_size.x, center.y), IM_COL32(255, 255, 255, 30), 2.0f);
+
+					//渲染当前帧
+					Rect& r = _frames[_animCurrentFrame].rect;
+					Vec2& off = _frames[_animCurrentFrame].offset;
+
+					ImVec2 uv0((float)r.x / _imgW, (float)r.y / _imgH);
+					ImVec2 uv1((float)(r.x + r.w) / _imgW, (float)(r.y + r.h) / _imgH);
+
+					float dispW = r.w * _animPreviewScale;
+					float dispH = r.h * _animPreviewScale;
+					ImVec2 draw_pos = ImVec2(
+						center.x - dispW / 2.0f + off.x * _animPreviewScale,
+						center.y - dispH / 2.0f + off.y * _animPreviewScale
+					);
+
+					draw_list->AddImage(
+						(ImTextureID)(intptr_t)_texture->getTexture(),
+						draw_pos,
+						ImVec2(draw_pos.x + dispW, draw_pos.y + dispH),
+						uv0, uv1
+					);
+					draw_list->PopClipRect();
+				}
+				else {
+					ImGui::Text("Load an image and add frames first.");
+				}
+				ImGui::EndTabItem();
+			}
+
+
+			ImGui::EndTabBar();
+		}
+	}
+	ImGui::End();
+}
+
+// ======================= 算法 =======================
+
+void SpriteEditor::AutoExtractSprites() {
+	if (!_rawPixels) return;
+	_frames.clear();
+
+	std::vector<bool> visited(_imgW * _imgH, false);
+	int dx[] = { -1, 1, 0, 0 };
+	int dy[] = { 0, 0, -1, 1 };
+
+	for (int y = 0; y < _imgH; ++y) {
+		for (int x = 0; x < _imgW; ++x) {
+			int idx = y * _imgW + x;
+			if (!visited[idx] && _rawPixels[idx * 4 + 3] > 10) {
+				std::queue<std::pair<int, int>> q;
+				q.push({ x, y });
+				visited[idx] = true;
+
+				int minX = x, maxX = x, minY = y, maxY = y;
+				int area = 0;
+
+				while (!q.empty()) {
+					auto[cx, cy] = q.front(); q.pop();
+					area++;
+					minX = std::min(minX, cx); maxX = std::max(maxX, cx);
+					minY = std::min(minY, cy); maxY = std::max(maxY, cy);
+
+					for (int i = 0; i < 4; ++i) {
+						int nx = cx + dx[i], ny = cy + dy[i];
+						if (nx >= 0 && nx < _imgW && ny >= 0 && ny < _imgH) {
+							int nidx = ny * _imgW + nx;
+							if (!visited[nidx] && _rawPixels[nidx * 4 + 3] > 10) {
+								visited[nidx] = true;
+								q.push({ nx, ny });
+							}
+						}
+					}
+				}
+
+				if (area >= _minArea) {
+					SpriteFrame sf;
+					sf.name = "auto_" + std::to_string(_frames.size());
+					sf.rect = Rect(minX, minY, maxX - minX + 1, maxY - minY + 1);
+					_frames.push_back(sf);
+				}
+			}
+		}
+	}
+	PushState();
+}
+
+struct RectNode {
+	int id, w, h;
+	bool operator<(const RectNode& o) const { return h > o.h; }
+};
+
+void SpriteEditor::AutoPackAtlas() {
+	if (_frames.empty() || !_rawPixels) return;
+
+	std::vector<RectNode> nodes;
+	for (int i = 0; i < _frames.size(); ++i) {
+		nodes.push_back({ i, (int)_frames[i].rect.w, (int)_frames[i].rect.h });
+	}
+	std::sort(nodes.begin(), nodes.end());
+
+	int maxW = 1024;
+	int curX = 0, curY = 0, rowH = 0;
+	std::vector<Rect> packedRects(nodes.size());
+
+	for (auto& n : nodes) {
+		if (curX + n.w > maxW) {
+			curX = 0;
+			curY += rowH;
+			rowH = 0;
+		}
+		packedRects[n.id] = Rect(curX, curY, n.w, n.h);
+		curX += n.w;
+		rowH = std::max(rowH, n.h);
+	}
+	int totalH = curY + rowH;
+
+	std::vector<unsigned char> canvas(maxW * totalH * 4, 0);
+	for (int i = 0; i < _frames.size(); ++i) {
+		Rect src = _frames[i].rect;
+		Rect dst = packedRects[i];
+		for (int y = 0; y < src.h; ++y) {
+			for (int x = 0; x < src.w; ++x) {
+				int srcIdx = ((int)src.y + y) * _imgW + ((int)src.x + x);
+				int dstIdx = ((int)dst.y + y) * maxW + ((int)dst.x + x);
+				for (int c = 0; c < 4; ++c) canvas[dstIdx * 4 + c] = _rawPixels[srcIdx * 4 + c];
+			}
+		}
+	}
+
+	// ... 前面生成 canvas 画布的代码不变 ...
+
+	_packedTexture->loadRawPixels(_renderer, canvas.data(), maxW, totalH);
+
+	// 决定路径 (优先存到源图片的目录)
+	std::string baseDir = ".";
+	if (!_currentImgPath.empty()) {
+		size_t pos = _currentImgPath.find_last_of("/\\");
+		if (pos != std::string::npos) baseDir = _currentImgPath.substr(0, pos);
+	}
+
+	_savePngPath = baseDir + "/atlas_output.png";
+	_savePlistPath = baseDir + "/atlas_output.plist";
+
+	stbi_write_png(_savePngPath.c_str(), maxW, totalH, 4, canvas.data(), maxW * 4);
+
+	std::ofstream out(_savePlistPath);
+
+
+	out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+	out << "<!DOCTYPE plist PUBLIC \"-//Apple Computer//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n";
+	out << "<plist version=\"1.0\">\n<dict>\n    <key>frames</key>\n    <dict>\n";
+	for (int i = 0; i < _frames.size(); ++i) {
+		out << "        <key>" << _frames[i].name << "</key>\n";
+		out << "        <dict>\n";
+		out << "            <key>textureRect</key>\n";
+		out << "            <string>{{" << packedRects[i].x << "," << packedRects[i].y << "},{"
+			<< packedRects[i].w << "," << packedRects[i].h << "}}</string>\n";
+		out << "        </dict>\n";
+	}
+	out << "    </dict>\n</dict>\n</plist>\n";
+
+	// ... 写入 plist 的逻辑保持不变 ...
+	out.close();
+	 
+	printf("Exported to %s and %s\n", _savePngPath.c_str(), _savePlistPath.c_str());
+
+
+}
+
+// ======================= 撤销重做 =======================
+
+void SpriteEditor::PushState() {
+	HistoryState state;
+	state.frames = _frames;
+	if (_historyIndex < (int)_history.size() - 1) {
+		_history.erase(_history.begin() + _historyIndex + 1, _history.end());
+	}
+	_history.push_back(state);
+	_historyIndex++;
+}
+
+void SpriteEditor::Undo() {
+	if (_historyIndex > 0) {
+		_historyIndex--;
+		RestoreState(_historyIndex);
+	}
+}
+
+void SpriteEditor::Redo() {
+	if (_historyIndex < (int)_history.size() - 1) {
+		_historyIndex++;
+		RestoreState(_historyIndex);
+	}
+}
+
+void SpriteEditor::RestoreState(int index) {
+	if (index >= 0 && index < _history.size()) {
+		_frames = _history[index].frames;
+		_selectedFrameIndex = -1;
+		_animCurrentFrame = -1;
+		_wantScrollToSelected = false;
+	}
+}
+
+
+// 【内存打包：不写文件，仅供预览】
+void SpriteEditor::PackAtlasToMemory()
+{
+	if (_frames.empty() || !_rawPixels) {
+		if (_packedTexture) _packedTexture->free();
+		_packW = 0;
+		_packH = 0;
+		return;
+	}
+	std::vector<RectNode> nodes;
+	for (int i = 0; i < _frames.size(); ++i) {
+		nodes.push_back({ i, (int)_frames[i].rect.w, (int)_frames[i].rect.h });
+	}
+	std::sort(nodes.begin(), nodes.end());
+	int maxW = 1024;
+	int curX = 0, curY = 0, rowH = 0;
+	std::vector<Rect> packedRects(nodes.size());
+	for (auto& n : nodes) {
+		if (curX + n.w > maxW) {
+			curX = 0;
+			curY += rowH;
+			rowH = 0;
+		}
+		packedRects[n.id] = Rect(curX, curY, n.w, n.h);
+		curX += n.w;
+		rowH = std::max(rowH, n.h);
+	}
+	int totalH = curY + rowH;
+	std::vector<unsigned char> canvas(maxW * totalH * 4, 0);
+	for (int i = 0; i < _frames.size(); ++i) {
+		Rect src = _frames[i].rect;
+		Rect dst = packedRects[i];
+		for (int y = 0; y < src.h; ++y) {
+			for (int x = 0; x < src.w; ++x) {
+				int srcIdx = ((int)src.y + y) * _imgW + ((int)src.x + x);
+				int dstIdx = ((int)dst.y + y) * maxW + ((int)dst.x + x);
+				for (int c = 0; c < 4; ++c) canvas[dstIdx * 4 + c] = _rawPixels[srcIdx * 4 + c];
+			}
+		}
+	}
+	_packedTexture->loadRawPixels(_renderer, canvas.data(), maxW, totalH);
+	_packW = maxW;
+	_packH = totalH;
+}
+
+//【保存已经打包好的数据到磁盘，返回true成功】
+bool SpriteEditor::SaveAtlasToFile()
+{
+	//====新增兜底保护====
+	if (_atlasExportName[0] == '\0')
+	{
+		strcpy(_atlasExportName, "atlas_output");
+	}
+
+	if (!_packedTexture || _packW <= 0 || _packH <= 0)
+	{
+		printf("Error: please pack atlas first!\n");
+		return false;
+	}
+
+	std::string baseDir = ".";
+	if (!_currentImgPath.empty())
+	{
+		size_t pos = _currentImgPath.find_last_of("/\\");
+		if (pos != std::string::npos)
+			baseDir = _currentImgPath.substr(0, pos);
+	}
+
+	//拼接完整路径：目录 + / + 名字 + 后缀
+	std::string pngName = std::string(_atlasExportName) + ".png";
+	std::string plistName = std::string(_atlasExportName) + ".plist";
+
+	_savePngPath = baseDir + "/" + pngName;
+	_savePlistPath = baseDir + "/" + plistName;
+
+	//重新生成打包画布
+	std::vector<RectNode> nodes;
+	for (int i = 0; i < _frames.size(); ++i) {
+		nodes.push_back({ i, (int)_frames[i].rect.w, (int)_frames[i].rect.h });
+	}
+	std::sort(nodes.begin(), nodes.end());
+
+	int maxW = 1024;
+	int curX = 0, curY = 0, rowH = 0;
+	std::vector<Rect> packedRects(nodes.size());
+	for (auto& n : nodes) {
+		if (curX + n.w > maxW) {
+			curX = 0;
+			curY += rowH;
+			rowH = 0;
+		}
+		packedRects[n.id] = Rect(curX, curY, n.w, n.h);
+		curX += n.w;
+		rowH = std::max(rowH, n.h);
+	}
+	int totalH = curY + rowH;
+
+	std::vector<unsigned char> canvas(maxW * totalH * 4, 0);
+	for (int i = 0; i < _frames.size(); ++i) {
+		Rect srcFrame = _frames[i].rect;
+		Rect dst = packedRects[i];
+		for (int y = 0; y < srcFrame.h; ++y) {
+			for (int x = 0; x < srcFrame.w; ++x) {
+				int srcIdx = ((int)srcFrame.y + y) * _imgW + ((int)srcFrame.x + x);
+				int dstIdx = ((int)dst.y + y) * maxW + ((int)dst.x + x);
+				for (int c = 0; c < 4; ++c)
+					canvas[dstIdx * 4 + c] = _rawPixels[srcIdx * 4 + c];
+			}
+		}
+	}
+
+	//写png
+	stbi_write_png(_savePngPath.c_str(), maxW, totalH, 4, canvas.data(), maxW * 4);
+
+	//写标准TP格式plist
+	std::ofstream out(_savePlistPath);
+	out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+	out << "<!DOCTYPE plist PUBLIC \"-//Apple Computer//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n";
+	out << "<plist version=\"1.0\">\n";
+	out << "<dict>\n";
+	out << "    <key>frames</key>\n";
+	out << "    <dict>\n";
+
+	for (int i = 0; i < _frames.size(); ++i)
+	{
+		Rect srcFrame = _frames[i].rect;
+		Rect dst = packedRects[i];
+		Vec2 off = _frames[i].offset;
+
+		out << "        <key>" << _frames[i].name << "</key>\n";
+		out << "        <dict>\n";
+		out << "            <key>frame</key>\n";
+		out << "            <string>{{" << dst.x << "," << dst.y << "},{" << dst.w << "," << dst.h << "}}</string>\n";
+		out << "            <key>offset</key>\n";
+		out << "            <string>{" << (int)off.x << "," << (int)off.y << "}</string>\n";
+		out << "            <key>rotated</key>\n";
+		out << "            <false/>\n";
+		out << "            <key>sourceColorRect</key>\n";
+		out << "            <string>{{0,0},{" << (int)srcFrame.w << "," << (int)srcFrame.h << "}}</string>\n";
+		out << "            <key>sourceSize</key>\n";
+		out << "            <string>{" << (int)srcFrame.w << "," << (int)srcFrame.h << "}</string>\n";
+		out << "        </dict>\n";
+	}
+	out << "    </dict>\n";
+
+	//metadata块，png文件名用我们导出的png名字
+	out << "    <key>metadata</key>\n";
+	out << "    <dict>\n";
+	out << "        <key>format</key>\n";
+	out << "        <integer>2</integer>\n";
+	out << "        <key>realTextureFileName</key>\n";
+	out << "        <string>" << pngName << "</string>\n";
+	out << "        <key>size</key>\n";
+	out << "        <string>{" << maxW << "," << totalH << "}</string>\n";
+	out << "        <key>smartupdate</key>\n";
+	out << "        <string>$TexturePacker:SmartUpdate:00000000000000000000000000000000$</string>\n";
+	out << "        <key>textureFileName</key>\n";
+	out << "        <string>" << pngName << "</string>\n";
+	out << "    </dict>\n";
+
+	out << "</dict>\n";
+	out << "</plist>\n";
+	out.close();
+
+	printf("Saved: Png=%s  Plist=%s\n", _savePngPath.c_str(), _savePlistPath.c_str());
+	return true;
+}
+
+
+
+ 

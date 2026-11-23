@@ -1,0 +1,78 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="D:\cplusplus\engine_tools\sprite_edit\Classes\Mat3.cpp">
+      <Filter>Source Files\Classes</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\cplusplus\engine_tools\sprite_edit\Classes\SimpleFileDialog.cpp">
+      <Filter>Source Files\Classes</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\cplusplus\engine_tools\sprite_edit\Classes\SpriteEditor.cpp">
+      <Filter>Source Files\Classes</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\cplusplus\engine_tools\sprite_edit\Classes\Texture2D.cpp">
+      <Filter>Source Files\Classes</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\cplusplus\engine_tools\sprite_edit\Classes\Type.cpp">
+      <Filter>Source Files\Classes</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\cplusplus\engine_tools\sprite_edit\example_sdl2_sdlrenderer2\main.cpp">
+      <Filter>Source Files\example_sdl2_sdlrenderer2</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="D:\cplusplus\engine_tools\sprite_edit\Classes\Mat3.h">
+      <Filter>Source Files\Classes</Filter>
+    </ClInclude>
+    <ClInclude Include="D:\cplusplus\engine_tools\sprite_edit\Classes\SimpleFileDialog.h">
+      <Filter>Source Files\Classes</Filter>
+    </ClInclude>
+    <ClInclude Include="D:\cplusplus\engine_tools\sprite_edit\Classes\SpriteEditor.h">
+      <Filter>Source Files\Classes</Filter>
+    </ClInclude>
+    <ClInclude Include="D:\cplusplus\engine_tools\sprite_edit\Classes\Texture2D.h">
+      <Filter>Source Files\Classes</Filter>
+    </ClInclude>
+    <ClInclude Include="D:\cplusplus\engine_tools\sprite_edit\Classes\Type.h">
+      <Filter>Source Files\Classes</Filter>
+    </ClInclude>
+    <ClInclude Include="D:\cplusplus\engine_tools\sprite_edit\Classes\stb_image.h">
+      <Filter>Source Files\Classes</Filter>
+    </ClInclude>
+    <ClInclude Include="D:\cplusplus\engine_tools\sprite_edit\Classes\stb_image_write.h">
+      <Filter>Source Files\Classes</Filter>
+    </ClInclude>
+    <ClInclude Include="D:\cplusplus\engine_tools\sprite_edit\Resources\ChrTX_EvcAli_Baltazar_cl.png">
+      <Filter>Resources</Filter>
+    </ClInclude>
+    <ClInclude Include="D:\cplusplus\engine_tools\sprite_edit\Resources\girl.png">
+      <Filter>Resources</Filter>
+    </ClInclude>
+    <ClInclude Include="D:\cplusplus\engine_tools\sprite_edit\Resources\particle.plist">
+      <Filter>Resources</Filter>
+    </ClInclude>
+    <ClInclude Include="D:\cplusplus\engine_tools\sprite_edit\Resources\particle1.plist">
+      <Filter>Resources</Filter>
+    </ClInclude>
+    <ClInclude Include="D:\cplusplus\engine_tools\sprite_edit\Resources\particle_texture.png">
+      <Filter>Resources</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="D:\cplusplus\engine_tools\sprite_edit\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Resources">
+      <UniqueIdentifier>{A145DA6E-0AC9-3A9F-8B4E-AEF0503530EC}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{6ED5B0B3-5706-372F-93D6-0B1131D1FC5A}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Classes">
+      <UniqueIdentifier>{3968277A-D1C2-38B4-9741-429DA6F9720A}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\example_sdl2_sdlrenderer2">
+      <UniqueIdentifier>{BAED8CCD-FF73-3049-ACAE-D8BAF08A1475}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

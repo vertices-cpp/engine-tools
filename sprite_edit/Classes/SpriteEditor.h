@@ -119,6 +119,9 @@ private:
 	//std::string _lastSaveResultTip;
 
 	void RefreshAtlasPreviewIfOpen(); // ★ 新增这一行声明
+
+	bool _repackOnExport = false; // 导出时是否紧凑重排
+	void RenumberFrames(); // 重新按顺序命名
 };
 
 #endif

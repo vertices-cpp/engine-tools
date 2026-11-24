@@ -427,6 +427,7 @@ void SpriteEditor::DrawCenterView() {
 						newFrame.markSelect = 0;
 						_frames.push_back(newFrame);
 						_selectedFrameIndex = _frames.size() - 1;
+						RenumberFrames(); // ★ 新增：点击新建后重排
 						PushState();
 					}
 				}
@@ -531,7 +532,6 @@ void SpriteEditor::RefreshAtlasPreviewIfOpen()
 
 void SpriteEditor::DrawLeftPanel() {
 	float availWidth = ImGui::GetContentRegionAvail().x;
-	// 自动计算合适的高度，适配手机大字体
 	float btnHeight = ImGui::GetFontSize() * 1.5f;
 
 	ImGui::Text("File Management");
@@ -549,15 +549,13 @@ void SpriteEditor::DrawLeftPanel() {
 	ImGui::Text("Export Atlas File Name(no ext):");
 	ImGui::InputText("##exportname", _atlasExportName, IM_ARRAYSIZE(_atlasExportName));
 	ImGui::SameLine();
-	ImGui::TextDisabled("(*.png / *.plist auto append)");
-	 
-	if (ImGui::Button("Save Atlas To File", ImVec2(availWidth, btnHeight)))
-	{
+	ImGui::TextDisabled("(*.png / *.plist)");
+
+	if (ImGui::Button("Save Atlas To File", ImVec2(availWidth, btnHeight))) {
 		SaveAtlasToFile();
 	}
 
 	ImGui::Separator();
-
 
 	// 路径显示
 	if (!_currentImgPath.empty()) {
@@ -568,12 +566,10 @@ void SpriteEditor::DrawLeftPanel() {
 		ImGui::TextColored(ImVec4(1, 0, 0, 1), "Input: None");
 	}
 
- 
-		ImGui::TextColored(ImVec4(0, 1, 0, 1), "Output PNG:");
-		ImGui::TextWrapped("%s", _savePngPath.c_str());
-		ImGui::TextColored(ImVec4(0, 1, 0, 1), "Output Plist:");
-		ImGui::TextWrapped("%s", _savePlistPath.c_str());
- 
+	ImGui::TextColored(ImVec4(0, 1, 0, 1), "Output PNG:");
+	ImGui::TextWrapped("%s", _savePngPath.c_str());
+	ImGui::TextColored(ImVec4(0, 1, 0, 1), "Output Plist:");
+	ImGui::TextWrapped("%s", _savePlistPath.c_str());
 
 	ImGui::Separator();
 	ImGui::Text("Image Info: %d x %d", _imgW, _imgH);
@@ -590,8 +586,11 @@ void SpriteEditor::DrawLeftPanel() {
 
 		ImGui::Checkbox("Snap to Grid", &_snapToGrid);
 
-		// =========新增：批量生成网格帧按钮=========
-		// =========新增：批量生成网格帧按钮=========
+		ImGui::Checkbox("Repack (Compact) on Export", &_repackOnExport);
+		if (ImGui::IsItemDeactivatedAfterEdit()) {
+			RefreshAtlasPreviewIfOpen(); // ★ 勾选/取消勾选时，立刻刷新预览
+		}
+
 		if (ImGui::Button("Generate Grid Frames", ImVec2(availWidth, btnHeight)))
 		{
 			if (_imgW > 0 && _imgH > 0 && _gridW > 0.0f && _gridH > 0.0f)
@@ -620,7 +619,7 @@ void SpriteEditor::DrawLeftPanel() {
 				}
 				_selectedFrameIndex = _frames.empty() ? -1 : 0;
 				_animCurrentFrame = _selectedFrameIndex;
-				PushState(); //保存撤销栈
+				PushState(); 
 				RefreshAtlasPreviewIfOpen();
 			}
 		}
@@ -637,6 +636,11 @@ void SpriteEditor::DrawLeftPanel() {
 		ImGui::InputInt("Min Area", &_minArea);
 		ImGui::PopItemWidth();
 
+		ImGui::Checkbox("Repack (Compact) on Export", &_repackOnExport);
+		if (ImGui::IsItemDeactivatedAfterEdit()) {
+			RefreshAtlasPreviewIfOpen(); // ★ 勾选/取消勾选时，立刻刷新预览
+		}
+
 		if (ImGui::Button("Extract Regions", ImVec2(availWidth, btnHeight))) {
 			AutoExtractSprites();
 		}
@@ -647,6 +651,12 @@ void SpriteEditor::DrawLeftPanel() {
 			RefreshAtlasPreviewIfOpen();
 		}
 	}
+
+	// ★ 放到这里刚刚好！属于图集操作逻辑
+	ImGui::Separator();
+	ImGui::Text("Export Options");
+	
+	ImGui::TextDisabled("Uncheck to keep original image layout.");
 }
 
 // ======================= 右侧面板：增加 Offset 编辑 =======================
@@ -746,8 +756,9 @@ void SpriteEditor::DrawRightPanel() {
 					else if (srcIdx > _selectedFrameIndex && dstIdx <= _selectedFrameIndex)
 						_selectedFrameIndex += 1;
 
+					RenumberFrames(); // ★ 新增：拖拽后重新编排序号
 					PushState();
-					RefreshAtlasPreviewIfOpen(); // ★ 拖拽重排后，若预览窗口开着则立刻刷新 Atlas Result
+					RefreshAtlasPreviewIfOpen();
 				}
 			}
 			ImGui::EndDragDropTarget();
@@ -797,6 +808,7 @@ void SpriteEditor::DrawRightPanel() {
 			{
 				_selectedFrameIndex--;
 			}
+			RenumberFrames(); // ★ 新增：删除后重新编排序号
 		}
 	}
 
@@ -832,6 +844,7 @@ void SpriteEditor::DrawRightPanel() {
 		_animCurrentFrame = _selectedFrameIndex;
 		_wantScrollToSelected = true;
 
+		RenumberFrames(); // ★ 新增：新增后重新编排序号
 		PushState();
 		RefreshAtlasPreviewIfOpen();
 	}
@@ -1136,6 +1149,7 @@ void SpriteEditor::AutoExtractSprites() {
 			}
 		}
 	}
+	RenumberFrames(); // ★ 新增
 	PushState();
 	RefreshAtlasPreviewIfOpen();
 }
@@ -1261,6 +1275,7 @@ void SpriteEditor::RestoreState(int index) {
 		_selectedFrameIndex = -1;
 		_animCurrentFrame = -1;
 		_wantScrollToSelected = false;
+		RenumberFrames(); // ★ 新增：撤销/重做后重排
 	}
 }
 void SpriteEditor::PackAtlasToMemory()
@@ -1271,12 +1286,28 @@ void SpriteEditor::PackAtlasToMemory()
 		_packH = 0;
 		return;
 	}
+
+	// ★ 新增逻辑：如果未勾选重排，预览直接使用原图
+	if (!_repackOnExport) {
+		_packedTexture->loadRawPixels(_renderer, _rawPixels, _imgW, _imgH);
+		_packW = _imgW;
+		_packH = _imgH;
+		return;
+	}
+
+	// ==== 下面是勾选重排（Mode 1）的打包逻辑 ====
 	std::vector<RectNode> nodes;
 	for (int i = 0; i < (int)_frames.size(); ++i) {
 		nodes.push_back({ i, (int)_frames[i].rect.w, (int)_frames[i].rect.h });
 	}
-	//std::sort(nodes.begin(), nodes.end());
-	int maxW = 1024;
+
+	// 动态计算最大宽度
+	int maxW = 512;
+	int sumW = 0;
+	for (auto& f : _frames) sumW += (int)f.rect.w;
+	if (sumW < maxW) maxW = sumW;
+	if (maxW < 64) maxW = 64;
+
 	int curX = 0, curY = 0, rowH = 0;
 	std::vector<Rect> packedRects(nodes.size());
 	for (auto& n : nodes) {
@@ -1329,12 +1360,8 @@ void SpriteEditor::PackAtlasToMemory()
 bool SpriteEditor::SaveAtlasToFile()
 {
 	if (_atlasExportName[0] == '\0') strcpy(_atlasExportName, "atlas_output");
-
-	// ★ 直接调用内存打包逻辑，会自动生成 _packedTexture 并更新 _packW / _packH
-	PackAtlasToMemory();
-
-	if (_packW <= 0 || _packH <= 0) {
-		printf("Error: Pack failed, no frames.\n");
+	if (_frames.empty() || !_rawPixels) {
+		printf("Error: Nothing to export.\n");
 		return false;
 	}
 
@@ -1349,35 +1376,59 @@ bool SpriteEditor::SaveAtlasToFile()
 	_savePngPath = baseDir + "/" + pngName;
 	_savePlistPath = baseDir + "/" + plistName;
 
-	// 重新生成一次像素数组给 stbi_write_png
-	std::vector<RectNode> nodes;
-	for (int i = 0; i < _frames.size(); ++i) nodes.push_back({ i, (int)_frames[i].rect.w, (int)_frames[i].rect.h });
-	//std::sort(nodes.begin(), nodes.end());
+	std::vector<Rect> packedRects(_frames.size());
 
-	std::vector<Rect> packedRects(nodes.size());
-	int curX = 0, curY = 0, rowH = 0;
-	for (auto& n : nodes) {
-		if (curX + n.w > _packW) { curX = 0; curY += rowH; rowH = 0; }
-		packedRects[n.id] = Rect(curX, curY, n.w, n.h);
-		curX += n.w;
-		rowH = std::max(rowH, n.h);
-	}
+	if (_repackOnExport) {
+		// ==== 模式1：重新紧凑拼装 ====
+		std::vector<RectNode> nodes;
+		for (int i = 0; i < _frames.size(); ++i) nodes.push_back({ i, (int)_frames[i].rect.w, (int)_frames[i].rect.h });
 
-	std::vector<unsigned char> canvas(_packW * _packH * 4, 0);
-	for (int i = 0; i < _frames.size(); ++i) {
-		Rect srcFrame = _frames[i].rect;
-		Rect dst = packedRects[i];
-		for (int y = 0; y < srcFrame.h; ++y) {
-			for (int x = 0; x < srcFrame.w; ++x) {
-				int srcIdx = ((int)srcFrame.y + y) * _imgW + ((int)srcFrame.x + x);
-				int dstIdx = ((int)dst.y + y) * _packW + ((int)dst.x + x);
-				for (int c = 0; c < 4; ++c) canvas[dstIdx * 4 + c] = _rawPixels[srcIdx * 4 + c];
+		// ★ 修复：动态计算 maxW，与内存预览逻辑保持一致
+		int maxW = 512;
+		int sumW = 0;
+		for (auto& f : _frames) sumW += (int)f.rect.w;
+		if (sumW < maxW) maxW = sumW;
+		if (maxW < 64) maxW = 64;
+
+		int curX = 0, curY = 0, rowH = 0;
+		for (auto& n : nodes) {
+			if (curX + n.w > maxW) { curX = 0; curY += rowH; rowH = 0; }
+			packedRects[n.id] = Rect(curX, curY, n.w, n.h);
+			curX += n.w;
+			rowH = std::max(rowH, n.h);
+		}
+		_packW = maxW;
+		_packH = curY + rowH;
+
+		std::vector<unsigned char> canvas((size_t)_packW * _packH * 4, 0);
+		for (int i = 0; i < _frames.size(); ++i) {
+			Rect src = _frames[i].rect;
+			Rect dst = packedRects[i];
+			for (int y = 0; y < src.h; ++y) {
+				for (int x = 0; x < src.w; ++x) {
+					size_t srcIdx = ((size_t)src.y + y) * _imgW + ((size_t)src.x + x);
+					size_t dstIdx = ((size_t)dst.y + y) * _packW + ((size_t)dst.x + x);
+					for (int c = 0; c < 4; ++c) canvas[dstIdx * 4 + c] = _rawPixels[srcIdx * 4 + c];
+				}
 			}
 		}
-	}
-	stbi_write_png(_savePngPath.c_str(), _packW, _packH, 4, canvas.data(), _packW * 4);
+		stbi_write_png(_savePngPath.c_str(), _packW, _packH, 4, canvas.data(), _packW * 4);
+		_packedTexture->loadRawPixels(_renderer, canvas.data(), _packW, _packH);
 
-	// 写标准TP格式plist
+	}
+	else {
+		// ==== 模式2：不重新拼装 ====
+		for (int i = 0; i < _frames.size(); ++i) {
+			packedRects[i] = _frames[i].rect;
+		}
+		_packW = _imgW;
+		_packH = _imgH;
+
+		stbi_write_png(_savePngPath.c_str(), _imgW, _imgH, 4, _rawPixels, _imgW * 4);
+		if (_packedTexture) _packedTexture->loadRawPixels(_renderer, _rawPixels, _imgW, _imgH);
+	}
+
+	// ==== 写 plist ====
 	std::ofstream out(_savePlistPath);
 	out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
 	out << "<!DOCTYPE plist PUBLIC \"-//Apple Computer//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n";
@@ -1386,8 +1437,7 @@ bool SpriteEditor::SaveAtlasToFile()
 	out << "    <key>frames</key>\n";
 	out << "    <dict>\n";
 
-	for (int i = 0; i < _frames.size(); ++i)
-	{
+	for (int i = 0; i < _frames.size(); ++i) {
 		Rect srcFrame = _frames[i].rect;
 		Rect dst = packedRects[i];
 		Vec2 off = _frames[i].offset;
@@ -1395,7 +1445,7 @@ bool SpriteEditor::SaveAtlasToFile()
 		out << "        <key>" << _frames[i].name << "</key>\n";
 		out << "        <dict>\n";
 		out << "            <key>frame</key>\n";
-		out << "            <string>{{" << dst.x << "," << dst.y << "},{" << dst.w << "," << dst.h << "}}</string>\n";
+		out << "            <string>{{" << (int)dst.x << "," << (int)dst.y << "},{" << (int)dst.w << "," << (int)dst.h << "}}</string>\n";
 		out << "            <key>offset</key>\n";
 		out << "            <string>{" << (int)off.x << "," << (int)off.y << "}</string>\n";
 		out << "            <key>rotated</key>\n";
@@ -1407,8 +1457,6 @@ bool SpriteEditor::SaveAtlasToFile()
 		out << "        </dict>\n";
 	}
 	out << "    </dict>\n";
-
-	//metadata块，png文件名用我们导出的png名字
 	out << "    <key>metadata</key>\n";
 	out << "    <dict>\n";
 	out << "        <key>format</key>\n";
@@ -1416,22 +1464,26 @@ bool SpriteEditor::SaveAtlasToFile()
 	out << "        <key>realTextureFileName</key>\n";
 	out << "        <string>" << pngName << "</string>\n";
 	out << "        <key>size</key>\n";
-
-	// ★ 修复：把 maxW 和 totalH 换成 _packW 和 _packH
 	out << "        <string>{" << _packW << "," << _packH << "}</string>\n";
-
 	out << "        <key>smartupdate</key>\n";
 	out << "        <string>$TexturePacker:SmartUpdate:00000000000000000000000000000000$</string>\n";
 	out << "        <key>textureFileName</key>\n";
 	out << "        <string>" << pngName << "</string>\n";
 	out << "    </dict>\n";
-
 	out << "</dict>\n";
 	out << "</plist>\n";
 	out.close();
 
 	printf("Saved: Png=%s  Plist=%s\n", _savePngPath.c_str(), _savePlistPath.c_str());
 	return true;
+}
+
+void SpriteEditor::RenumberFrames() {
+	for (int i = 0; i < (int)_frames.size(); ++i) {
+		char nameBuf[64];
+		snprintf(nameBuf, sizeof(nameBuf), "frame_%04d.png", i);
+		_frames[i].name = nameBuf;
+	}
 }
 
 

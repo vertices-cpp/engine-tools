@@ -4,6 +4,8 @@
 #include <iostream>
 #include <fstream>
 #include <cstdio>
+#include <cstring>
+
 
 // ★ 不要在这里定义 STB_IMAGE_IMPLEMENTATION，它在 Texture2D.cpp 已经定义过了
 #include "stb_image.h" 
@@ -43,7 +45,8 @@ void SpriteEditor::init(SDL_Renderer* renderer) {
 }
 
 
-void SpriteEditor::loadImage(const std::string& path) {
+// SpriteEditor.cpp 中实现改为：
+void SpriteEditor::loadImage(const std::string& path, bool clearExistingFrames) {
 	_currentImgPath = path;
 	int comp;
 	if (_rawPixels) {
@@ -58,11 +61,13 @@ void SpriteEditor::loadImage(const std::string& path) {
 		return;
 	}
 
-	// ★ 核心修复：将原始 RGBA 像素直接上传为纹理
 	_texture->loadRawPixels(_renderer, _rawPixels, _imgW, _imgH);
 
-	_frames.clear();
-	_selectedFrameIndex = -1;
+	if (clearExistingFrames) {
+		_frames.clear();
+		_selectedFrameIndex = -1;
+		_animCurrentFrame = -1;
+	}
 	PushState();
 	printf("Loaded image: %d x %d\n", _imgW, _imgH);
 }
@@ -72,7 +77,6 @@ void SpriteEditor::loadPlist(const std::string& path) {
 	XMLDocument doc;
 	if (doc.LoadFile(path.c_str()) != XML_SUCCESS) return;
 
-	_frames.clear();
 	XMLElement* root = doc.FirstChildElement("plist");
 	if (!root) return;
 	XMLElement* dict = root->FirstChildElement("dict");
@@ -86,6 +90,8 @@ void SpriteEditor::loadPlist(const std::string& path) {
 
 	XMLElement* framesDict = framesNode->NextSiblingElement("dict");
 	if (!framesDict) return;
+
+	std::vector<SpriteFrame> parsedFrames; // 先暂存到局部 vector，避免被 loadImage 清空
 
 	for (XMLElement* e = framesDict->FirstChildElement(); e != nullptr; e = e->NextSiblingElement()) {
 		if (std::string(e->Value()) == "key") {
@@ -106,13 +112,77 @@ void SpriteEditor::loadPlist(const std::string& path) {
 						SpriteFrame sf;
 						sf.name = frameName;
 						sf.rect = Rect((float)x, (float)y, (float)w, (float)h);
-						_frames.push_back(sf);
+
+						XMLElement* offsetNode = subDict->FirstChildElement("key");
+						while (offsetNode && std::string(offsetNode->GetText()) != "offset") {
+							offsetNode = offsetNode->NextSiblingElement("key");
+						}
+						if (offsetNode) {
+							XMLElement* offStrNode = offsetNode->NextSiblingElement("string");
+							if (offStrNode) {
+								std::string offStr = offStrNode->GetText();
+								int ox, oy;
+								if (sscanf(offStr.c_str(), "{%d,%d}", &ox, &oy) == 2) {
+									sf.offset = Vec2((float)ox, (float)oy);
+								}
+							}
+						}
+
+						parsedFrames.push_back(sf);
 					}
 				}
 			}
 		}
 	}
-	PushState();
+
+	// ★ 就在这里：循环结束后、PushState() 之前，先加载对应图片，再回填 _frames
+	std::string texFileName;
+	XMLElement* metaKey = dict->FirstChildElement("key");
+	while (metaKey && std::string(metaKey->GetText()) != "metadata") {
+		metaKey = metaKey->NextSiblingElement("key");
+	}
+	if (metaKey) {
+		XMLElement* metaDict = metaKey->NextSiblingElement("dict");
+		if (metaDict) {
+			for (XMLElement* me = metaDict->FirstChildElement(); me != nullptr; me = me->NextSiblingElement()) {
+				if (std::string(me->Value()) == "key") {
+					std::string k = me->GetText() ? me->GetText() : "";
+					XMLElement* valNode = me->NextSiblingElement("string");
+					if (valNode && valNode->GetText()) {
+						if (k == "realTextureFileName" || (k == "textureFileName" && texFileName.empty())) {
+							texFileName = valNode->GetText();
+						}
+					}
+				}
+			}
+		}
+	}
+
+	std::string baseDir = ".";
+	size_t slashPos = path.find_last_of("/\\");
+	if (slashPos != std::string::npos) {
+		baseDir = path.substr(0, slashPos);
+	}
+
+	std::string imgPath;
+	if (!texFileName.empty()) {
+		bool hasDir = (texFileName.find('/') != std::string::npos) || (texFileName.find('\\') != std::string::npos);
+		imgPath = hasDir ? texFileName : (baseDir + "/" + texFileName);
+	}
+	else {
+		size_t dotPos = path.find_last_of('.');
+		std::string stem = (dotPos != std::string::npos) ? path.substr(0, dotPos) : path;
+		imgPath = stem + ".png";
+	}
+
+	loadImage(imgPath); // 内部会清空 _frames 并上传贴图
+	_frames = std::move(parsedFrames);
+	_selectedFrameIndex = _frames.empty() ? -1 : 0;
+	_animCurrentFrame = _selectedFrameIndex;
+
+	RefreshAtlasPreviewIfOpen(); // ★ 加载新 plist 后，若预览窗口开着则立刻重打包
+	PushState(); 
+
 	printf("Loaded Plist, frames: %d\n", (int)_frames.size());
 }
 
@@ -341,7 +411,10 @@ void SpriteEditor::DrawCenterView() {
 							localY = floor(localY / _gridH) * _gridH;
 						}
 						SpriteFrame newFrame;
-						newFrame.name = "frame_" + std::to_string(_frames.size());
+						// ★ 修复：改成 frame_ 格式，并补齐 4 位数字
+						char nameBuf[64];
+						snprintf(nameBuf, sizeof(nameBuf), "frame_%04d.png", (int)_frames.size());
+						newFrame.name = nameBuf;
 						newFrame.rect = Rect(localX, localY, _snapToGrid ? _gridW : 64, _snapToGrid ? _gridH : 64);
 						newFrame.markSelect = 0;
 						_frames.push_back(newFrame);
@@ -523,9 +596,12 @@ void SpriteEditor::DrawLeftPanel() {
 					for (float x = 0.0f; x < _imgW; x += _gridW)
 					{
 						SpriteFrame newFrame;
-						newFrame.name = "grid_" + std::to_string(_frames.size());
+						// ★ 修复：改成 frame_ 格式，并补齐 4 位数字
+						char nameBuf[64];
+						snprintf(nameBuf, sizeof(nameBuf), "frame_%04d.png", (int)_frames.size());
+						newFrame.name = nameBuf;
 						newFrame.rect = Rect(x, y, _gridW, _gridH);
-						newFrame.markSelect = 0; //标记初始0
+						newFrame.markSelect = 0;
 						_frames.push_back(newFrame);
 					}
 				}
@@ -548,6 +624,12 @@ void SpriteEditor::DrawLeftPanel() {
 
 		if (ImGui::Button("Extract Regions", ImVec2(availWidth, btnHeight))) {
 			AutoExtractSprites();
+		}
+		if (ImGui::Button("Clear Frames", ImVec2(availWidth, btnHeight))) {
+			_frames.clear();
+			_selectedFrameIndex = -1;
+			PushState();
+			RefreshAtlasPreviewIfOpen();
 		}
 	}
 }
@@ -703,8 +785,41 @@ void SpriteEditor::DrawRightPanel() {
 	}
 
 	ImGui::EndChild();
+	 
+	if (ImGui::Button("Add Frame"))
+	{
+		float newX = 0.0f;
+		float newY = 0.0f;
+		float newW = (_gridW > 0.0f) ? _gridW : 16.0f;
+		float newH = (_gridH > 0.0f) ? _gridH : 16.0f;
 
+		// 如果当前有选中的帧，默认在它右侧/下方错开一点，方便直接拖拽或改坐标
+		if (_selectedFrameIndex >= 0 && _selectedFrameIndex < (int)_frames.size())
+		{
+			const auto& cur = _frames[_selectedFrameIndex].rect;
+			newX = cur.x + cur.w;
+			newY = cur.y;
+			newW = (cur.w > 0.0f) ? cur.w : newW;
+			newH = (cur.h > 0.0f) ? cur.h : newH;
+		}
 
+		SpriteFrame newFrame;
+		char nameBuf[64];
+		snprintf(nameBuf, sizeof(nameBuf), "frame_%04d.png", (int)_frames.size());
+		newFrame.name = nameBuf;
+		newFrame.rect = Rect(newX, newY, newW, newH);
+		newFrame.offset = Vec2(0.0f, 0.0f);
+		newFrame.markSelect = 0;
+
+		_frames.push_back(newFrame);
+		_selectedFrameIndex = (int)_frames.size() - 1;
+		_animCurrentFrame = _selectedFrameIndex;
+		_wantScrollToSelected = true;
+
+		PushState();
+		RefreshAtlasPreviewIfOpen();
+	}
+	ImGui::SameLine();
 	//=====快捷按钮：清除全部标记=====
 	if (ImGui::Button("Clear All Mark"))
 	{
@@ -839,9 +954,15 @@ void SpriteEditor::DrawPreviewWindow() {
 
 
 			// Tab 2: 动画播放预览
+			// Tab 2: 动画播放预览
 			if (ImGui::BeginTabItem("Animation")) {
 				if (_texture && _texture->getTexture() && !_frames.empty()) {
 					int frameTotal = (int)_frames.size();
+
+					// ★ 防止 _animCurrentFrame 为 -1 或越界导致 vector subscript out of range
+					if (_animCurrentFrame < 0 || _animCurrentFrame >= frameTotal) {
+						_animCurrentFrame = 0;
+					}
 
 					//运行时扫描标记，得到播放区间（UI显示提示用）
 					int playBeginIdx = 0, playEndIdx = frameTotal - 1;
@@ -989,7 +1110,10 @@ void SpriteEditor::AutoExtractSprites() {
 
 				if (area >= _minArea) {
 					SpriteFrame sf;
-					sf.name = "auto_" + std::to_string(_frames.size());
+					// ★ 修复：改成 frame_ 格式，并补齐 4 位数字
+					char nameBuf[64];
+					snprintf(nameBuf, sizeof(nameBuf), "frame_%04d.png", (int)_frames.size());
+					sf.name = nameBuf;
 					sf.rect = Rect(minX, minY, maxX - minX + 1, maxY - minY + 1);
 					_frames.push_back(sf);
 				}
@@ -997,6 +1121,7 @@ void SpriteEditor::AutoExtractSprites() {
 		}
 	}
 	PushState();
+	RefreshAtlasPreviewIfOpen();
 }
 
 struct RectNode {
@@ -1011,9 +1136,15 @@ void SpriteEditor::AutoPackAtlas() {
 	for (int i = 0; i < _frames.size(); ++i) {
 		nodes.push_back({ i, (int)_frames[i].rect.w, (int)_frames[i].rect.h });
 	}
-	std::sort(nodes.begin(), nodes.end());
+	//std::sort(nodes.begin(), nodes.end());
 
-	int maxW = 1024;
+	// 动态计算最大宽度：取 512 和 所有图块宽度之和 的较小值
+	int maxW = 512;
+	int sumW = 0;
+	for (auto& f : _frames) sumW += (int)f.rect.w;
+	if (sumW < maxW) maxW = sumW;
+	if (maxW < 64) maxW = 64; // 兜底，别小于64
+
 	int curX = 0, curY = 0, rowH = 0;
 	std::vector<Rect> packedRects(nodes.size());
 
@@ -1131,7 +1262,7 @@ void SpriteEditor::PackAtlasToMemory()
 	for (int i = 0; i < _frames.size(); ++i) {
 		nodes.push_back({ i, (int)_frames[i].rect.w, (int)_frames[i].rect.h });
 	}
-	std::sort(nodes.begin(), nodes.end());
+	//std::sort(nodes.begin(), nodes.end());
 	int maxW = 1024;
 	int curX = 0, curY = 0, rowH = 0;
 	std::vector<Rect> packedRects(nodes.size());
@@ -1162,77 +1293,59 @@ void SpriteEditor::PackAtlasToMemory()
 	_packW = maxW;
 	_packH = totalH;
 }
-
 //【保存已经打包好的数据到磁盘，返回true成功】
 bool SpriteEditor::SaveAtlasToFile()
 {
-	//====新增兜底保护====
-	if (_atlasExportName[0] == '\0')
-	{
-		strcpy(_atlasExportName, "atlas_output");
-	}
+	if (_atlasExportName[0] == '\0') strcpy(_atlasExportName, "atlas_output");
 
-	if (!_packedTexture || _packW <= 0 || _packH <= 0)
-	{
-		printf("Error: please pack atlas first!\n");
+	// ★ 直接调用内存打包逻辑，会自动生成 _packedTexture 并更新 _packW / _packH
+	PackAtlasToMemory();
+
+	if (_packW <= 0 || _packH <= 0) {
+		printf("Error: Pack failed, no frames.\n");
 		return false;
 	}
 
 	std::string baseDir = ".";
-	if (!_currentImgPath.empty())
-	{
+	if (!_currentImgPath.empty()) {
 		size_t pos = _currentImgPath.find_last_of("/\\");
-		if (pos != std::string::npos)
-			baseDir = _currentImgPath.substr(0, pos);
+		if (pos != std::string::npos) baseDir = _currentImgPath.substr(0, pos);
 	}
 
-	//拼接完整路径：目录 + / + 名字 + 后缀
 	std::string pngName = std::string(_atlasExportName) + ".png";
 	std::string plistName = std::string(_atlasExportName) + ".plist";
-
 	_savePngPath = baseDir + "/" + pngName;
 	_savePlistPath = baseDir + "/" + plistName;
 
-	//重新生成打包画布
+	// 重新生成一次像素数组给 stbi_write_png
 	std::vector<RectNode> nodes;
-	for (int i = 0; i < _frames.size(); ++i) {
-		nodes.push_back({ i, (int)_frames[i].rect.w, (int)_frames[i].rect.h });
-	}
-	std::sort(nodes.begin(), nodes.end());
+	for (int i = 0; i < _frames.size(); ++i) nodes.push_back({ i, (int)_frames[i].rect.w, (int)_frames[i].rect.h });
+	//std::sort(nodes.begin(), nodes.end());
 
-	int maxW = 1024;
-	int curX = 0, curY = 0, rowH = 0;
 	std::vector<Rect> packedRects(nodes.size());
+	int curX = 0, curY = 0, rowH = 0;
 	for (auto& n : nodes) {
-		if (curX + n.w > maxW) {
-			curX = 0;
-			curY += rowH;
-			rowH = 0;
-		}
+		if (curX + n.w > _packW) { curX = 0; curY += rowH; rowH = 0; }
 		packedRects[n.id] = Rect(curX, curY, n.w, n.h);
 		curX += n.w;
 		rowH = std::max(rowH, n.h);
 	}
-	int totalH = curY + rowH;
 
-	std::vector<unsigned char> canvas(maxW * totalH * 4, 0);
+	std::vector<unsigned char> canvas(_packW * _packH * 4, 0);
 	for (int i = 0; i < _frames.size(); ++i) {
 		Rect srcFrame = _frames[i].rect;
 		Rect dst = packedRects[i];
 		for (int y = 0; y < srcFrame.h; ++y) {
 			for (int x = 0; x < srcFrame.w; ++x) {
 				int srcIdx = ((int)srcFrame.y + y) * _imgW + ((int)srcFrame.x + x);
-				int dstIdx = ((int)dst.y + y) * maxW + ((int)dst.x + x);
-				for (int c = 0; c < 4; ++c)
-					canvas[dstIdx * 4 + c] = _rawPixels[srcIdx * 4 + c];
+				int dstIdx = ((int)dst.y + y) * _packW + ((int)dst.x + x);
+				for (int c = 0; c < 4; ++c) canvas[dstIdx * 4 + c] = _rawPixels[srcIdx * 4 + c];
 			}
 		}
 	}
+	stbi_write_png(_savePngPath.c_str(), _packW, _packH, 4, canvas.data(), _packW * 4);
 
-	//写png
-	stbi_write_png(_savePngPath.c_str(), maxW, totalH, 4, canvas.data(), maxW * 4);
-
-	//写标准TP格式plist
+	// 写标准TP格式plist
 	std::ofstream out(_savePlistPath);
 	out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
 	out << "<!DOCTYPE plist PUBLIC \"-//Apple Computer//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n";
@@ -1271,7 +1384,10 @@ bool SpriteEditor::SaveAtlasToFile()
 	out << "        <key>realTextureFileName</key>\n";
 	out << "        <string>" << pngName << "</string>\n";
 	out << "        <key>size</key>\n";
-	out << "        <string>{" << maxW << "," << totalH << "}</string>\n";
+
+	// ★ 修复：把 maxW 和 totalH 换成 _packW 和 _packH
+	out << "        <string>{" << _packW << "," << _packH << "}</string>\n";
+
 	out << "        <key>smartupdate</key>\n";
 	out << "        <string>$TexturePacker:SmartUpdate:00000000000000000000000000000000$</string>\n";
 	out << "        <key>textureFileName</key>\n";
@@ -1285,7 +1401,6 @@ bool SpriteEditor::SaveAtlasToFile()
 	printf("Saved: Png=%s  Plist=%s\n", _savePngPath.c_str(), _savePlistPath.c_str());
 	return true;
 }
-
 
 
  

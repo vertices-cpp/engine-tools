@@ -27,7 +27,8 @@ public:
 	void update(float dt);
 	void drawUI();
 
-	void loadImage(const std::string& path);
+	// SpriteEditor.h 中声明改为：
+	void loadImage(const std::string& path, bool clearExistingFrames = true);
 	void loadPlist(const std::string& path);
 
 private:

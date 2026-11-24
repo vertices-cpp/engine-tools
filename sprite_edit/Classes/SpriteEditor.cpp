@@ -58,6 +58,13 @@ void SpriteEditor::loadImage(const std::string& path, bool clearExistingFrames) 
 	if (!_rawPixels) {
 		printf("Failed to load image: %s\nReason: %s\n", path.c_str(), stbi_failure_reason());
 		_imgW = _imgH = 0;
+		if (_texture) _texture->free();
+		if (clearExistingFrames) {
+			_frames.clear();
+			_selectedFrameIndex = -1;
+			_animCurrentFrame = -1;
+		}
+		RefreshAtlasPreviewIfOpen();
 		return;
 	}
 
@@ -68,6 +75,7 @@ void SpriteEditor::loadImage(const std::string& path, bool clearExistingFrames) 
 		_selectedFrameIndex = -1;
 		_animCurrentFrame = -1;
 	}
+	RefreshAtlasPreviewIfOpen(); // ★ 加载图片后若预览窗口开着，同步刷新/清空旧图集预览
 	PushState();
 	printf("Loaded image: %d x %d\n", _imgW, _imgH);
 }
@@ -583,28 +591,35 @@ void SpriteEditor::DrawLeftPanel() {
 		ImGui::Checkbox("Snap to Grid", &_snapToGrid);
 
 		// =========新增：批量生成网格帧按钮=========
+		// =========新增：批量生成网格帧按钮=========
 		if (ImGui::Button("Generate Grid Frames", ImVec2(availWidth, btnHeight)))
 		{
-			if (_imgW > 0 && _imgH > 0)
+			if (_imgW > 0 && _imgH > 0 && _gridW > 0.0f && _gridH > 0.0f)
 			{
-				// 可选：生成网格前清空旧帧
 				_frames.clear();
 				_selectedFrameIndex = -1;
 
-				for (float y = 0.0f; y < _imgH; y += _gridH)
+				for (float y = 0.0f; y < (float)_imgH; y += _gridH)
 				{
-					for (float x = 0.0f; x < _imgW; x += _gridW)
+					float curH = std::min(_gridH, (float)_imgH - y);
+					if (curH <= 0.0f) continue;
+
+					for (float x = 0.0f; x < (float)_imgW; x += _gridW)
 					{
+						float curW = std::min(_gridW, (float)_imgW - x);
+						if (curW <= 0.0f) continue;
+
 						SpriteFrame newFrame;
-						// ★ 修复：改成 frame_ 格式，并补齐 4 位数字
 						char nameBuf[64];
 						snprintf(nameBuf, sizeof(nameBuf), "frame_%04d.png", (int)_frames.size());
 						newFrame.name = nameBuf;
-						newFrame.rect = Rect(x, y, _gridW, _gridH);
+						newFrame.rect = Rect(x, y, curW, curH);
 						newFrame.markSelect = 0;
 						_frames.push_back(newFrame);
 					}
 				}
+				_selectedFrameIndex = _frames.empty() ? -1 : 0;
+				_animCurrentFrame = _selectedFrameIndex;
 				PushState(); //保存撤销栈
 				RefreshAtlasPreviewIfOpen();
 			}
@@ -732,6 +747,7 @@ void SpriteEditor::DrawRightPanel() {
 						_selectedFrameIndex += 1;
 
 					PushState();
+					RefreshAtlasPreviewIfOpen(); // ★ 拖拽重排后，若预览窗口开着则立刻刷新 Atlas Result
 				}
 			}
 			ImGui::EndDragDropTarget();
@@ -1247,19 +1263,16 @@ void SpriteEditor::RestoreState(int index) {
 		_wantScrollToSelected = false;
 	}
 }
-
-
-// 【内存打包：不写文件，仅供预览】
 void SpriteEditor::PackAtlasToMemory()
 {
-	if (_frames.empty() || !_rawPixels) {
+	if (_frames.empty() || !_rawPixels || _imgW <= 0 || _imgH <= 0) {
 		if (_packedTexture) _packedTexture->free();
 		_packW = 0;
 		_packH = 0;
 		return;
 	}
 	std::vector<RectNode> nodes;
-	for (int i = 0; i < _frames.size(); ++i) {
+	for (int i = 0; i < (int)_frames.size(); ++i) {
 		nodes.push_back({ i, (int)_frames[i].rect.w, (int)_frames[i].rect.h });
 	}
 	//std::sort(nodes.begin(), nodes.end());
@@ -1277,15 +1290,34 @@ void SpriteEditor::PackAtlasToMemory()
 		rowH = std::max(rowH, n.h);
 	}
 	int totalH = curY + rowH;
-	std::vector<unsigned char> canvas(maxW * totalH * 4, 0);
-	for (int i = 0; i < _frames.size(); ++i) {
+	if (totalH <= 0) {
+		if (_packedTexture) _packedTexture->free();
+		_packW = 0;
+		_packH = 0;
+		return;
+	}
+
+	std::vector<unsigned char> canvas((size_t)maxW * (size_t)totalH * 4, 0);
+	for (int i = 0; i < (int)_frames.size(); ++i) {
 		Rect src = _frames[i].rect;
 		Rect dst = packedRects[i];
-		for (int y = 0; y < src.h; ++y) {
-			for (int x = 0; x < src.w; ++x) {
-				int srcIdx = ((int)src.y + y) * _imgW + ((int)src.x + x);
-				int dstIdx = ((int)dst.y + y) * maxW + ((int)dst.x + x);
-				for (int c = 0; c < 4; ++c) canvas[dstIdx * 4 + c] = _rawPixels[srcIdx * 4 + c];
+		int copyW = (int)src.w;
+		int copyH = (int)src.h;
+		for (int y = 0; y < copyH; ++y) {
+			int srcY = (int)src.y + y;
+			int dstY = (int)dst.y + y;
+			if (srcY < 0 || srcY >= _imgH || dstY < 0 || dstY >= totalH) continue;
+
+			for (int x = 0; x < copyW; ++x) {
+				int srcX = (int)src.x + x;
+				int dstX = (int)dst.x + x;
+				if (srcX < 0 || srcX >= _imgW || dstX < 0 || dstX >= maxW) continue;
+
+				size_t srcIdx = ((size_t)srcY * (size_t)_imgW + (size_t)srcX) * 4;
+				size_t dstIdx = ((size_t)dstY * (size_t)maxW + (size_t)dstX) * 4;
+				for (int c = 0; c < 4; ++c) {
+					canvas[dstIdx + c] = _rawPixels[srcIdx + c];
+				}
 			}
 		}
 	}

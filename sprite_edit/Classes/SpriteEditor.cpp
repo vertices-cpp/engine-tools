@@ -26,6 +26,14 @@ static inline T Clamp(T v, T minv, T maxv)
 	return v;
 }
 
+static std::string StripPngSuffix(const std::string& name) {
+	const std::string suffix = ".png";
+	if (name.size() >= suffix.size() &&
+		name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
+		return name.substr(0, name.size() - suffix.size());
+	}
+	return name;
+}
 
 SpriteEditor::SpriteEditor() {
 	_texture = new Texture2D();
@@ -763,10 +771,21 @@ void SpriteEditor::DrawRightPanel() {
 			}
 			ImGui::EndDragDropTarget();
 		}
-
-		// ====== 右键上下文菜单【Delete】重点补回 ======
+		 
+		// ====== 右键上下文菜单：Rename 在 Delete 上面 ======
 		if (ImGui::BeginPopupContextItem())
 		{
+			if (ImGui::MenuItem("Rename..."))
+			{
+				_renameTargetIdx = i;
+				_renameBatchMode = false;
+				_renameStartNum = 0;
+				std::string initName = StripPngSuffix(f.name);
+				if (initName.empty()) initName = "frame_";
+				snprintf(_renameInputBuf, sizeof(_renameInputBuf), "%s", initName.c_str());
+				_openRenamePopup = true;
+				ImGui::CloseCurrentPopup();
+			}
 			if (ImGui::MenuItem("Delete"))
 			{
 				markDeleteIdx = i; //只记录标记，不erase、不break
@@ -813,6 +832,34 @@ void SpriteEditor::DrawRightPanel() {
 	}
 
 	ImGui::EndChild();
+
+	if (_openRenamePopup) {
+		ImGui::OpenPopup("Rename Frame(s)");
+		_openRenamePopup = false;
+	}
+
+	if (ImGui::BeginPopupModal("Rename Frame(s)", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		ImGui::InputText("Name / Prefix", _renameInputBuf, IM_ARRAYSIZE(_renameInputBuf));
+		ImGui::Checkbox("Batch Format (auto index)", &_renameBatchMode);
+
+		if (_renameBatchMode) {
+			ImGui::InputInt("Start Index", &_renameStartNum);
+			if (_renameStartNum < 0) _renameStartNum = 0;
+			ImGui::Checkbox("Use Start/End Marks (else from current to end)", &_renameUseMarkedRange);
+		}
+
+		ImGui::Separator();
+		if (ImGui::Button("OK", ImVec2(100, 0))) {
+			ApplyRenameFromPopup();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel", ImVec2(100, 0))) {
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndPopup();
+	}
+
 	 
 	if (ImGui::Button("Add Frame"))
 	{
@@ -1428,6 +1475,7 @@ bool SpriteEditor::SaveAtlasToFile()
 		if (_packedTexture) _packedTexture->loadRawPixels(_renderer, _rawPixels, _imgW, _imgH);
 	}
 
+	EnsureUniqueFrameNamesForExport();
 	// ==== 写 plist ====
 	std::ofstream out(_savePlistPath);
 	out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
@@ -1485,6 +1533,165 @@ void SpriteEditor::RenumberFrames() {
 		_frames[i].name = nameBuf;
 	}
 }
+ 
 
 
+// 1. 剥离末尾 ".png" 和末尾 "_数字"，还原纯前缀（如 "aa_0005.png" -> "aa_"）
+static std::string ExtractCleanPrefix(const std::string& rawInput) {
+	const std::string suffix = ".png";
+	std::string s = rawInput;
+	if (s.size() >= suffix.size() &&
+		s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0) {
+		s = s.substr(0, s.size() - suffix.size());
+	}
+	if (s.empty()) return "frame_";
+
+	size_t underscorePos = s.find_last_of('_');
+	if (underscorePos != std::string::npos && underscorePos + 1 < s.size()) {
+		bool allDigits = true;
+		for (size_t i = underscorePos + 1; i < s.size(); ++i) {
+			if (!isdigit((unsigned char)s[i])) {
+				allDigits = false;
+				break;
+			}
+		}
+		if (allDigits) {
+			s = s.substr(0, underscorePos + 1);
+		}
+	}
+
+	if (!s.empty() && s.back() != '_') {
+		s += "_";
+	}
+	return s;
+}
+
+static std::string FormatIndexedName(const std::string& prefix, int index) {
+	char buf[192];
+	snprintf(buf, sizeof(buf), "%s%04d.png", prefix.c_str(), std::max(0, index));
+	return std::string(buf);
+}
+
+void SpriteEditor::MakeUniqueFrameName(std::string& candidate, int selfIdx) const {
+	std::string prefix = ExtractCleanPrefix(candidate);
+
+	auto hasNameConflict = [&](const std::string& testName) -> bool {
+		for (int i = 0; i < (int)_frames.size(); ++i) {
+			if (i == selfIdx) continue;
+			if (_frames[i].name == testName) return true;
+		}
+		return false;
+	};
+
+	int seq = 0;
+	while (true) {
+		std::string trial = FormatIndexedName(prefix, seq++);
+		if (!hasNameConflict(trial)) {
+			candidate = trial;
+			return;
+		}
+	}
+}
+
+void SpriteEditor::ApplyRenameFromPopup() {
+	if (_frames.empty() || _renameTargetIdx < 0 || _renameTargetIdx >= (int)_frames.size()) return;
+
+	if (!_renameBatchMode) {
+		std::string nameStr = _renameInputBuf;
+		if (nameStr.empty()) nameStr = "frame_";
+		MakeUniqueFrameName(nameStr, _renameTargetIdx);
+		_frames[_renameTargetIdx].name = nameStr;
+	}
+	else {
+		int total = (int)_frames.size();
+		int curIdx = Clamp(_renameTargetIdx, 0, total - 1);
+		int beginIdx = curIdx;
+		int endIdx = total - 1;
+
+		if (_renameUseMarkedRange) {
+			int startMarkIdx = -1;
+			int endMarkIdx = -1;
+			for (int i = 0; i < total; ++i) {
+				if (_frames[i].markSelect == 1) startMarkIdx = i;
+				if (_frames[i].markSelect == 2) endMarkIdx = i;
+			}
+
+			if (startMarkIdx != -1 && endMarkIdx != -1) {
+				beginIdx = std::min(startMarkIdx, endMarkIdx);
+				endIdx = std::max(startMarkIdx, endMarkIdx);
+			}
+			else if (startMarkIdx != -1) {
+				beginIdx = startMarkIdx;
+				endIdx = std::max(startMarkIdx, curIdx);
+			}
+			else if (endMarkIdx != -1) {
+				beginIdx = std::min(curIdx, endMarkIdx);
+				endIdx = endMarkIdx;
+			}
+		}
+
+		std::string prefix = ExtractCleanPrefix(_renameInputBuf);
+
+			int maxUsedNum = -1;
+		for (int i = 0; i < total; ++i) {
+			if (i >= beginIdx && i <= endIdx) continue;
+			const std::string& n = _frames[i].name;
+			if (n.compare(0, prefix.size(), prefix) == 0) {
+				std::string rest = n.substr(prefix.size());
+				const std::string pngExt = ".png";
+				if (rest.size() >= pngExt.size() &&
+					rest.compare(rest.size() - pngExt.size(), pngExt.size(), pngExt) == 0) {
+					rest = rest.substr(0, rest.size() - pngExt.size());
+				}
+				if (!rest.empty()) {
+					bool allDigits = true;
+					for (char ch : rest) {
+						if (!isdigit((unsigned char)ch)) { allDigits = false; break; }
+					}
+					if (allDigits) {
+						maxUsedNum = std::max(maxUsedNum, std::atoi(rest.c_str()));
+					}
+				}
+			}
+		}
+
+		int num = std::max(0, _renameStartNum);
+		if (maxUsedNum >= 0 && _renameStartNum == 0) {
+			num = maxUsedNum + 1;
+		}
+
+		auto isOccupiedOutside = [&](const std::string& testName, int idxInRange) -> bool {
+			for (int i = 0; i < total; ++i) {
+				if (i == idxInRange) continue;
+				if (i < beginIdx || i > endIdx) {
+					if (_frames[i].name == testName) return true;
+				}
+			}
+			return false;
+		};
+
+		for (int i = beginIdx; i <= endIdx; ++i) {
+			std::string candidate;
+			while (true) {
+				candidate = FormatIndexedName(prefix, num++);
+					if (!isOccupiedOutside(candidate, i)) break;
+			}
+			_frames[i].name = candidate;
+		}
+	}
+
+	PushState();
+	RefreshAtlasPreviewIfOpen();
+}
+
+void SpriteEditor::EnsureUniqueFrameNamesForExport() {
+	for (int i = 0; i < (int)_frames.size(); ++i) {
+		if (_frames[i].name.empty()) {
+			char buf[64];
+			snprintf(buf, sizeof(buf), "frame_%04d.png", i);
+			_frames[i].name = buf;
+		}
+		MakeUniqueFrameName(_frames[i].name, i);
+	}
+}
  

@@ -37,8 +37,7 @@ private:
 	void DrawCenterView();
 	void DrawRightPanel();
 	void DrawPreviewWindow(); // ★ 新增：预览窗口
-
-	void SaveSnapshot();
+	 
 	void Undo();
 	void Redo();
 	 
@@ -122,6 +121,19 @@ private:
 
 	bool _repackOnExport = false; // 导出时是否紧凑重排
 	void RenumberFrames(); // 重新按顺序命名
+
+
+	// 右键重命名弹窗状态
+	bool _openRenamePopup = false;
+	int _renameTargetIdx = -1;
+	char _renameInputBuf[128] = "frame_";
+	bool _renameBatchMode = false;      // false=单帧改名, true=批量格式化编号
+	bool _renameUseMarkedRange = true;  // 批量时优先用 Start/End 标记区间
+	int _renameStartNum = 0;            // 批量起始编号
+
+	void MakeUniqueFrameName(std::string& candidate, int selfIdx) const;
+	void ApplyRenameFromPopup();
+	void EnsureUniqueFrameNamesForExport();
 };
 
 #endif

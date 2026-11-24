@@ -3,3 +3,5 @@
 ![texture packer](screenshots/01.gif)
 
 ![texture packer](screenshots/02.gif)
+
+![texture packer](screenshots/03.gif)

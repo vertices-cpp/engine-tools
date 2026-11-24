@@ -1120,7 +1120,7 @@ void SpriteEditor::AutoExtractSprites() {
 				int area = 0;
 
 				while (!q.empty()) {
-					auto[cx, cy] = q.front(); q.pop();
+					auto cx = q.front().first, cy  = q.front().second; q.pop();
 					area++;
 					minX = std::min(minX, cx); maxX = std::max(maxX, cx);
 					minY = std::min(minY, cy); maxY = std::max(maxY, cy);
